@@ -1,0 +1,169 @@
+"""Review pipeline — orchestrates diff acquisition, chunking, dep fetching,
+context budgeting, and graph execution.
+
+Entry point: ``run_pipeline(repo_path, ...)`` builds the ReviewContext,
+runs the graph, and returns the final ReviewSummary.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from codey.cache.ast_cache import CacheDB
+from codey.graph.build import run_review
+from codey.index.indexer import git_head_hash
+from codey.llm.summarize import summarize_diffs
+from codey.review.chunking import chunk_diff
+from codey.review.deps import enrich_context
+from codey.review.git import get_changed_files, get_commit_diff, get_latest_commit
+
+from codey.agents.context import ReviewContext
+
+__all__ = ["PipelineResult", "run_pipeline"]
+
+# Threshold (chars) above which a file's diff is summarised via the cheap model.
+_LARGE_DIFF_THRESHOLD = 24_000
+
+
+class PipelineResult:
+    """Wrapper with the final review + contextual metadata."""
+
+    def __init__(self, review, ctx, large_diffs=None):
+        self.review = review
+        self.ctx = ctx
+        self.large_diffs = large_diffs or []
+
+
+def run_pipeline(
+    repo_path: Path | str,
+    db: CacheDB,
+    *,
+    primary_llm: object | None = None,
+    summarizer_llm: object | None = None,
+    progress_callback=None,
+    diff_override: dict[str, str] | None = None,
+    changed_files_override: list[str] | None = None,
+) -> Any:
+    """Run the full review pipeline on the latest commit.
+
+    Args:
+        repo_path: Path to the git repo.
+        db: Open CacheDB instance.
+        primary_llm: Main review model (or None to skip LLM calls).
+        summarizer_llm: Cheap/fast model for diff summarisation (or None).
+        progress_callback: Optional callback receiving graph stream chunks.
+        diff_override: Override per-file diffs (skip git diff acquisition).
+        changed_files_override: Override changed files list.
+
+    Returns:
+        PipelineResult wrapping the ReviewSummary and ReviewContext.
+    """
+    repo = Path(repo_path).resolve()
+
+    # 1. Acquire diff + commit info.
+    commit = get_latest_commit(repo)
+    git_hash = commit.hash if commit else (git_head_hash(repo) or "unknown")
+    commit_message = commit.message if commit else ""
+
+    if diff_override is not None:
+        diffs = diff_override
+        changed_files = changed_files_override or list(diff_override.keys())
+    else:
+        diffs = get_commit_diff(repo)
+        changed_files = get_changed_files(repo)
+
+    if not diffs and not changed_files:
+        changed_files = changed_files_override or []
+
+    # 2. Index the repo (so symbol table is fresh for chunking + deps).
+    # This also builds the call graph.
+    from codey.index.callgraph import build_call_graph
+    from codey.index.indexer import index_repository
+
+    index_result = index_repository(repo, db)
+    build_call_graph(repo, index_result.git_hash, db)
+    git_hash = index_result.git_hash
+
+    # 3. Chunk diffs (function/class level) using cached symbol table.
+    chunk_list = chunk_diff(
+        diffs,
+        db=db,
+        repo_path=str(repo),
+        git_hash=git_hash,
+    )
+
+    # 4. Summarise large diffs via the cheap/fast model.
+    large_diffs: list[str] = []
+    if summarizer_llm is not None:
+        for path, text in diffs.items():
+            if len(text) > _LARGE_DIFF_THRESHOLD:
+                large_diffs.append(path)
+        # Note: summarisation happens inside agent prompts via DiffChunk
+        # token budgeting, not inline here (keeps the pipeline lean).
+        _summarise_if_needed(safeguard=primary_llm is not None, summarizer=summarizer_llm, diffs=diffs, paths=large_diffs)
+
+    # 5. Assemble full diff text for context.
+    full_diff = "\n".join(diffs.values()) if diffs else ""
+
+    # 6. Build the review context.
+    ctx = ReviewContext(
+        repo_path=repo,
+        git_hash=git_hash,
+        commit_message=commit_message,
+        changed_files=changed_files,
+        diff_chunks=chunk_list,
+        full_diff=full_diff,
+        db=db,
+    )
+
+    # 7. Fetch dependent (affected-but-unmodified) files + source snippets.
+    enrich_context(ctx, db)
+
+    # 8. Enforce context window budget on chunks.
+    _prune_to_budget(ctx)
+
+    # 9. Run the LangGraph review graph.
+    review = run_review(
+        ctx,
+        primary_llm=primary_llm,
+        summarizer_llm=summarizer_llm,
+        progress_callback=progress_callback,
+    )
+
+    return PipelineResult(review=review, ctx=ctx, large_diffs=large_diffs)
+
+
+def _summarise_if_needed(*, safeguard: bool, summarizer, diffs: dict[str, str], paths: list[str]) -> None:
+    """If any diffs exceed the large threshold, summarise them via the cheap model.
+
+    This replaces the raw diff text in the diffs dict with a compact summary,
+    so downstream agents get facts instead of raw hunks for very large changes.
+    """
+    if not safeguard or summarizer is None or not paths:
+        return
+    summaries = summarize_diffs(summarizer, {p: diffs[p] for p in paths})
+    for s in summaries:
+        diffs[s.path] = s.summary
+
+
+def _prune_to_budget(ctx: ReviewContext, *, max_tokens: int = 100_000) -> None:
+    """Drop low-priority chunks if the total context exceeds the model budget."""
+    if not ctx.diff_chunks:
+        return
+    total = sum(len(c.diff_text) // 4 for c in ctx.diff_chunks)
+    if total <= max_tokens:
+        return
+    # Keep chunks with most content (assume highest signal), drop from the end.
+    sorted_chunks = sorted(ctx.diff_chunks, key=lambda c: len(c.diff_text), reverse=True)
+    kept_budget = 0
+    kept: list = []
+    for chunk in sorted_chunks:
+        cost = len(chunk.diff_text) // 4
+        if kept_budget + cost > max_tokens:
+            break
+        kept.append(chunk)
+        kept_budget += cost
+    # Re-sort by file path + line for readability.
+    kept.sort(key=lambda c: (c.file_path, c.line_start))
+    ctx.diff_chunks = kept
