@@ -51,6 +51,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["codey"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"codey/cache/schema.sql" = "codey/cache/schema.sql"
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
