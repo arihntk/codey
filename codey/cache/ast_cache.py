@@ -378,6 +378,53 @@ class CacheDB:
             )
         ]
 
+    def all_imports_for_modules(
+        self,
+        repo_path: str,
+        git_hash: str,
+        modules: set[str],
+    ) -> list[ImportEdge]:
+        """Return import edges for any of the given module strings."""
+        if not modules:
+            return []
+        placeholders = ",".join("?" * len(modules))
+        rows = self._conn.execute(
+            f"""SELECT rel_path, module, imported_name, alias, line
+                FROM import_edges
+                WHERE repo_path=? AND git_hash=?
+                  AND module IN ({placeholders})""",
+            (repo_path, git_hash, *modules),
+        )
+        return [
+            ImportEdge(
+                rel_path=row["rel_path"],
+                module=row["module"],
+                imported_name=row["imported_name"],
+                alias=row["alias"],
+                line=row["line"],
+            )
+            for row in rows
+        ]
+
+    def all_call_edges(self, repo_path: str, git_hash: str) -> list[CallEdge]:
+        return [
+            CallEdge(
+                caller_path=row["caller_path"],
+                caller_qname=row["caller_qname"],
+                callee_name=row["callee_name"],
+                callee_path=row["callee_path"],
+                callee_qname=row["callee_qname"],
+                line=row["line"],
+            )
+            for row in self._conn.execute(
+                """SELECT caller_path, caller_qname, callee_name, callee_path,
+                          callee_qname, line
+                   FROM call_edges
+                   WHERE repo_path=? AND git_hash=?""",
+                (repo_path, git_hash),
+            )
+        ]
+
     def clear_run(self, repo_path: str, git_hash: str) -> None:
         """Delete all data for a given (repo, git_hash) run."""
         self._conn.execute("DELETE FROM file_entries WHERE repo_path=? AND git_hash=?",
