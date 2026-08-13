@@ -55,11 +55,15 @@ packages = ["codey"]
 "codey/cache/schema.sql" = "codey/cache/schema.sql"
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [dependency-groups]
 dev = [

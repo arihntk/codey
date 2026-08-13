@@ -21,7 +21,6 @@ from codey.agents.schemas import (
     ReviewSummary,
     Severity,
     aggregate_severity,
-    severity_weight,
 )
 from codey.tools.shell import build_tools_for_agents
 
@@ -62,11 +61,9 @@ def run_codey_agent(
     rec = _default_recommendation(all_findings)
 
     summary_text = _build_text_summary(ctx, agent_reports, overall, rec)
-    token_usage = 0
 
     if primary_llm is not None:
-        llm_summary, used = _llm_synthesise(primary_llm, agent_reports, ctx)
-        token_usage = used
+        llm_summary, _used = _llm_synthesise(primary_llm, agent_reports, ctx)
         if llm_summary:
             summary_text = llm_summary
 
@@ -177,7 +174,7 @@ def _llm_synthesise(
             return summary, len(raw) // 4
         except json.JSONDecodeError:
             return text, len(raw) // 4
-    except Exception as e:
+    except Exception:
         return "", 0
 
 
@@ -191,8 +188,8 @@ def spawn_retrieval_subagent(
     Uses langgraph's create_react_agent pattern.
     """
     try:
-        from langgraph.prebuilt import create_react_agent
         from langchain_core.messages import HumanMessage, SystemMessage
+        from langgraph.prebuilt import create_react_agent
 
         tools = build_tools_for_agents(repo)
         agent = create_react_agent(primary_llm, tools=tools)

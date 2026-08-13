@@ -7,11 +7,10 @@ augmented by the jedi call-graph builder (see ``callgraph.py``).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 from codey.cache.ast_cache import SymbolRecord
-from codey.index.languages import detect_language
 
 __all__ = ["extract_symbols", "serialize_ast", "SymbolExtractor"]
 
@@ -82,7 +81,10 @@ class SymbolExtractor:
 
     def _extract_generic(self, tree, rel_path: str) -> list[RawSymbol]:
         symbols: list[RawSymbol] = []
-        function_types = {"function_definition", "function_declaration", "method_definition", "arrow_function", "function_expression"}
+        function_types = {
+            "function_definition", "function_declaration",
+            "method_definition", "arrow_function", "function_expression",
+        }
         class_types = {"class_definition", "class_declaration"}
 
         def visit(node, scope_qname: str) -> None:

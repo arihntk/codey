@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tree_sitter_language_pack import get_parser
 
-from codey.cache.ast_cache import CacheDB, FileEntry, SymbolRecord, hash_content
+from codey.cache.ast_cache import CacheDB, FileEntry, SymbolRecord
 from codey.index.languages import detect_language
 from codey.index.symbols import extract_symbols, serialize_ast
 
@@ -108,7 +108,6 @@ def _content_hash(content: str) -> str:
 def _parse_file(path: Path, language: str) -> tuple[str, str, list[SymbolRecord], int]:
     """Parse a single file, returning (ast_json, symbols_json, symbols, byte_count)."""
     raw = path.read_bytes()
-    content = raw.decode("utf-8", errors="replace")
     try:
         parser = get_parser(language)
         tree = parser.parse(raw)

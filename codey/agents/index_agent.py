@@ -9,8 +9,6 @@ Responsibilities:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.cache.ast_cache import CacheDB

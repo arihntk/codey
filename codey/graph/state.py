@@ -55,7 +55,12 @@ class ReviewState(TypedDict, total=False):
     errors: Annotated[list[str], add]
 
 
-def initial_state(ctx: ReviewContext, *, primary_llm: object | None = None, summarizer_llm: object | None = None) -> ReviewState:
+def initial_state(
+    ctx: ReviewContext,
+    *,
+    primary_llm: object | None = None,
+    summarizer_llm: object | None = None,
+) -> ReviewState:
     """Build the initial state for the review graph."""
     return ReviewState(
         context=ctx,

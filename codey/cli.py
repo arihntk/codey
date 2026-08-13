@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import typer
@@ -17,14 +16,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 
-from codey.config.providers import PRESETS, ProviderPreset, all_presets, get_preset
+from codey.config.providers import ProviderPreset, all_presets, get_preset
 from codey.config.store import (
     Config,
     ConfigError,
     get_api_key,
     is_provider_configured,
     load_config,
-    resolve_provider,
     save_config,
     set_api_key,
 )
@@ -257,7 +255,6 @@ def review_cmd(
 ):
     """Review the latest commit in the local repo."""
     from codey.cache.ast_cache import CacheDB
-    from codey.config.store import resolve_provider
     from codey.llm.factory import build_llm, build_summarizer
     from codey.progress import ProgressEmitter, make_callback
     from codey.render.report import prompt_view_standalone, render_review

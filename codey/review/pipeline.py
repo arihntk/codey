@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from codey.agents.context import ReviewContext
 from codey.cache.ast_cache import CacheDB
 from codey.graph.build import run_review
 from codey.index.indexer import git_head_hash
@@ -17,8 +18,6 @@ from codey.llm.summarize import summarize_diffs
 from codey.review.chunking import chunk_diff
 from codey.review.deps import enrich_context
 from codey.review.git import get_changed_files, get_commit_diff, get_latest_commit
-
-from codey.agents.context import ReviewContext
 
 __all__ = ["PipelineResult", "run_pipeline"]
 
@@ -101,7 +100,12 @@ def run_pipeline(
                 large_diffs.append(path)
         # Note: summarisation happens inside agent prompts via DiffChunk
         # token budgeting, not inline here (keeps the pipeline lean).
-        _summarise_if_needed(safeguard=primary_llm is not None, summarizer=summarizer_llm, diffs=diffs, paths=large_diffs)
+        _summarise_if_needed(
+            safeguard=primary_llm is not None,
+            summarizer=summarizer_llm,
+            diffs=diffs,
+            paths=large_diffs,
+        )
 
     # 5. Assemble full diff text for context.
     full_diff = "\n".join(diffs.values()) if diffs else ""

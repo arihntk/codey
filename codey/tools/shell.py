@@ -7,13 +7,10 @@ read-only inspection capabilities they need for code review.
 
 from __future__ import annotations
 
-import os
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
 
 __all__ = [
     "ShellResult",
@@ -25,7 +22,7 @@ __all__ = [
     "build_tools_for_agents",
 ]
 
-RepoPath = Union[str, Path]
+RepoPath = str | Path
 
 
 @dataclass
@@ -40,7 +37,7 @@ class ShellResult:
     def __str__(self) -> str:
         return self.stdout if self.ok else f"[exit {self.returncode}] {self.stderr}"
 
-    def truncate(self, max_chars: int = 20_000) -> "ShellResult":
+    def truncate(self, max_chars: int = 20_000) -> ShellResult:
         if len(self.stdout) <= max_chars:
             return self
         return ShellResult(
@@ -112,7 +109,7 @@ def run_grep(
     repo_path = _validate_repo(repo)
     args: list[str] = []
     if _binary_available("rg"):
-        args = ["rg", "--no-heading", "-n", f"--max-count=500"]
+        args = ["rg", "--no-heading", "-n", "--max-count=500"]
         if ignore_case:
             args.append("-i")
         if context:

@@ -7,7 +7,7 @@ synthesizes these into a ``ReviewReport``.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -22,7 +22,7 @@ __all__ = [
 ]
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -30,7 +30,7 @@ class Severity(str, Enum):
     INFO = "info"
 
 
-class FindingCategory(str, Enum):
+class FindingCategory(StrEnum):
     SECURITY = "security"
     CODE_QUALITY = "code_quality"
     ARCHITECTURE = "architecture"

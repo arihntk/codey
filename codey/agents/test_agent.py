@@ -9,7 +9,6 @@ based on the changed files.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -188,10 +187,11 @@ def run_test_agent(
                 confidence=0.9,
             ))
 
+    passed = sum(1 for f in findings if f.severity == Severity.INFO)
     return AgentReport(
         agent="test",
         status="completed",
-        summary=f"Ran {len(frameworks)} test framework(s). {sum(1 for f in findings if f.severity == Severity.INFO)}/{len(findings)} passed.",
+        summary=f"Ran {len(frameworks)} test framework(s). {passed}/{len(findings)} passed.",
         findings=findings,
         metadata=metadata,
         token_usage=token_usage,

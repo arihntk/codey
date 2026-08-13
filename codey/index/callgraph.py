@@ -221,8 +221,21 @@ def reverse_dependencies(
     - B calls a function/class defined in A.
     """
     repo = repo or Path(repo_path).resolve()
-    affected_set = {Path(p).resolve() for p in affected_paths}
+    affected_set: set[Path] = set()
+    for p in affected_paths:
+        pp = Path(p)
+        if pp.is_absolute():
+            affected_set.add(pp.resolve())
+        else:
+            affected_set.add((repo / pp).resolve())
     normalised = {str(p) for p in affected_set}
+
+    # Map affected files back to relative paths for DB queries.
+    def _rel(ap: Path) -> str:
+        try:
+            return str(ap.relative_to(repo))
+        except ValueError:
+            return str(ap)
 
     # 1. Import-based reverse deps.
     affected_modules: set[str] = set()
@@ -236,8 +249,6 @@ def reverse_dependencies(
         for imp in db.importers_of_module(str(repo), git_hash, mod):
             if imp.rel_path not in normalised:
                 dependents.add(imp.rel_path)
-        # Also handle "from <package.module> import x" where package.module
-        # maps to an affected file.
         for imp in db.all_imports_for_modules(str(repo), git_hash, {mod}):
             if imp.rel_path not in normalised:
                 dependents.add(imp.rel_path)
@@ -245,7 +256,7 @@ def reverse_dependencies(
     # 2. Call-based reverse deps: symbols defined in affected files.
     affected_symbols: set[str] = set()
     for ap in affected_set:
-        rel = str(ap.relative_to(repo)) if ap.is_absolute() else str(ap)
+        rel = _rel(ap)
         for s in db.symbols_in_file(str(repo), git_hash, rel):
             affected_symbols.add(s.name)
 

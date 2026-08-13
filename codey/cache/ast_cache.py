@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import Iterable, Sequence
 
 __all__ = [
     "CacheDB",
@@ -96,7 +96,7 @@ class CacheDB:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "CacheDB":
+    def __enter__(self) -> CacheDB:
         return self
 
     def __exit__(self, *args: object) -> None:

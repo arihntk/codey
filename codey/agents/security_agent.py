@@ -127,13 +127,8 @@ def run_security_agent(
 def _run_bandit(repo: Path, py_files: list[str]) -> str:
     if not py_files:
         return ""
-    binary = shutil.which("bandit") or shutil.which("python") and "python -m bandit"
     if not shutil.which("bandit"):
-        try:
-            import bandit
-            binary = None
-        except ImportError:
-            return ""
+        return ""
     try:
         cmd = ["bandit", "-f", "json", "-q"] + py_files
         proc = subprocess.run(
@@ -253,7 +248,7 @@ def _parse_gitleaks_json(raw: str) -> list[Finding]:
             line_start=r.get("StartLine"),
             line_end=r.get("EndLine"),
             evidence=r.get("Secret", "")[:100] + "..." if r.get("Secret") else "",
-            recommendation="Remove the secret and rotate it immediately. Use environment variables or a secrets manager.",
+            recommendation="Remove the secret and rotate it immediately via env vars or a secrets manager.",
             confidence=0.9,
         ))
     return findings
