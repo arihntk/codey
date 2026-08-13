@@ -1,0 +1,1 @@
+"""Secure credential & provider configuration store (OS keyring-backed)."""

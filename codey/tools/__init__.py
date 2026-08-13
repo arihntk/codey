@@ -1,0 +1,1 @@
+"""Allow-listed shell tools (grep/cat/ls/git) for agent use."""
