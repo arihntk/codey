@@ -1,0 +1,169 @@
+"""CodeQualityAgent — benchmarks the commit against existing codebase patterns.
+
+Uses the index summary (architecture/design conventions from IndexAgent) plus
+the diff chunks to ask the LLM whether the new code follows the established
+patterns: naming, typing, docstring coverage, error handling, structure, etc.
+"""
+
+from __future__ import annotations
+
+import json
+
+from codey.agents.context import ReviewContext
+from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+
+__all__ = ["run_code_quality_agent"]
+
+_QUALITY_SYSTEM = (
+    "You are a senior code quality reviewer. Given a diff and the codebase's "
+    "architecture summary, evaluate the change against the existing conventions:\n"
+    "1. Naming consistency (functions, classes, variables)\n"
+    "2. Type hint coverage and style\n"
+    "3. Docstring/comment coverage\n"
+    "4. Error handling patterns\n"
+    "5. Code duplication or unnecessary complexity\n"
+    "6. Architectural alignment (does it follow the module structure?)\n\n"
+    "For each issue, output a JSON object with:\n"
+    "  severity, title, description, file_path, line_start, line_end, evidence,\n"
+    "  recommendation, confidence\n"
+    "Use category 'code_quality'. If the code meets benchmarks, output an empty "
+    "array []. Output only a JSON array."
+)
+
+
+def run_code_quality_agent(
+    ctx: ReviewContext,
+    db=None,
+    llm: object | None = None,
+) -> AgentReport:
+    """Assess code quality of the diff against codebase benchmarks."""
+    findings: list[Finding] = []
+    token_usage = 0
+
+    if not ctx.diff_chunks and not ctx.full_diff:
+        return AgentReport(
+            agent="code_quality",
+            status="skipped",
+            summary="No diff provided for quality analysis.",
+            findings=[],
+        )
+
+    if llm is None:
+        return AgentReport(
+            agent="code_quality",
+            status="skipped",
+            summary="No LLM configured for quality analysis.",
+            findings=[],
+        )
+
+    # Build context: architecture summary + diff chunks + dependent file snippets.
+    diff_text = _build_diff_context(ctx)
+    arch_context = ctx.index_summary or "(no architecture summary available)"
+
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        response = llm.invoke([
+            SystemMessage(content=_QUALITY_SYSTEM),
+            HumanMessage(content=(
+                f"## Codebase conventions\n{arch_context}\n\n"
+                f"## Changes to review\n{diff_text}"
+            )),
+        ])
+        raw = response.content if isinstance(response.content, str) else str(response.content)
+        token_usage = len(raw) // 4
+        findings = _parse_llm_findings(raw)
+    except Exception as e:
+        findings.append(Finding(
+            category=FindingCategory.CODE_QUALITY,
+            severity=Severity.LOW,
+            title="Code quality LLM analysis failed",
+            description=str(e),
+            confidence=0.3,
+        ))
+
+    if not findings:
+        findings.append(Finding(
+            category=FindingCategory.CODE_QUALITY,
+            severity=Severity.INFO,
+            title="Code meets quality benchmarks",
+            description="No quality issues detected. The change follows established codebase conventions.",
+            confidence=0.7,
+        ))
+
+    return AgentReport(
+        agent="code_quality",
+        status="completed",
+        summary=f"Quality analysis of {len(ctx.changed_files)} file(s). Found {len(findings)} finding(s).",
+        findings=findings,
+        metadata={
+            "diff_chunks": str(len(ctx.diff_chunks)),
+            "dependent_files": str(len(ctx.dependent_files)),
+        },
+        token_usage=token_usage,
+    )
+
+
+def _build_diff_context(ctx: ReviewContext, *, max_chars: int = 16_000) -> str:
+    """Build a compact text representation of the diff chunks for the LLM."""
+    parts: list[str] = []
+    total = 0
+    for chunk in ctx.diff_chunks:
+        header = (
+            f"### {chunk.file_path} :: {chunk.symbol_kind} {chunk.symbol} "
+            f"(L{chunk.line_start}-{chunk.line_end})"
+        )
+        body = chunk.diff_text
+        entry = f"{header}\n```diff\n{body}\n```\n"
+        if total + len(entry) > max_chars:
+            remaining = max_chars - total
+            if remaining > 200:
+                entry = entry[:remaining] + "\n... [truncated]\n"
+                parts.append(entry)
+            break
+        parts.append(entry)
+        total += len(entry)
+
+    # Include dependent file snippets if there's room.
+    dep_budget = max_chars - total
+    if dep_budget > 1000 and ctx.dependent_files:
+        parts.append("\n## Dependent files (affected but not changed):\n")
+        for dep in ctx.dependent_files[:10]:
+            source = ctx.file_sources.get(dep, "")
+            if source:
+                snippet = source[:800]
+                parts.append(f"### {dep}\n```python\n{snippet}\n```\n")
+                dep_budget -= len(snippet) + 200
+                if dep_budget < 200:
+                    break
+
+    return "\n".join(parts) if parts else ctx.full_diff[:max_chars]
+
+
+def _parse_llm_findings(text: str) -> list[Finding]:
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    findings: list[Finding] = []
+    for item in data:
+        try:
+            findings.append(Finding(
+                category=FindingCategory.CODE_QUALITY,
+                severity=Severity(item.get("severity", "info").lower()),
+                title=item.get("title", ""),
+                description=item.get("description", ""),
+                file_path=item.get("file_path"),
+                line_start=item.get("line_start"),
+                line_end=item.get("line_end"),
+                evidence=item.get("evidence", ""),
+                recommendation=item.get("recommendation", ""),
+                confidence=float(item.get("confidence", 0.7)),
+            ))
+        except (ValueError, TypeError):
+            continue
+    return findings
