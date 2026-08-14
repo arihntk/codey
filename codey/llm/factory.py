@@ -48,13 +48,18 @@ def _instantiate(
     kwargs: dict[str, object] = {
         "model": model_name,
         "api_key": api_key,
+        "max_retries": 3,
     }
     if preset.key == "deepseek":
         kwargs["base_url"] = base_url or "https://api.deepseek.com"
     elif base_url:
         kwargs["base_url"] = base_url
 
-    return cls(**kwargs)
+    try:
+        return cls(**kwargs)
+    except TypeError:
+        kwargs.pop("max_retries", None)
+        return cls(**kwargs)
 
 
 def _ensure_api_key_in_env(preset: ProviderPreset, api_key: str) -> None:
