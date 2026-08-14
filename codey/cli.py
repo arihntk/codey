@@ -408,6 +408,13 @@ def review_cmd(
         )
     except Exception as e:
         emitter.emit_error("pipeline", str(e))
+        _is_rate_limit_err = _is_rate_limit_error(e)
+        if _is_rate_limit_err:
+            console.print(
+                "[red]All retry attempts exhausted.[/] The LLM provider is rate-limiting "
+                "your requests. Wait a minute and try again, or switch to a different "
+                "model/provider with [bold]codey set[/]."
+            )
         raise typer.Exit(1) from e
     finally:
         db.close()
@@ -418,6 +425,18 @@ def review_cmd(
 
     if report:
         prompt_view_standalone(result.review, console=console)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """True when *exc* is likely a rate-limit / quota error after retries."""
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            return int(status) == 429
+        except (TypeError, ValueError):
+            pass
+    name = type(exc).__name__.lower()
+    return "ratelimit" in name or "quota" in name or "resourceexhausted" in name
 
 
 def main() -> None:
