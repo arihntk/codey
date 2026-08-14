@@ -1,10 +1,12 @@
-"""Codey CLI — typer-based commands: set, model, config, review.
+"""Codey CLI — typer-based commands: set, unset, model, config, review.
 
 \\b
-  codey set      Configure provider & API key (OpenAI/Anthropic/DeepSeek/Google/Custom)
-  codey model    View or switch the active model
-  codey config   Show current configuration
-  codey review   Review the latest commit in the local repo
+  codey set                Configure provider & API key (OpenAI/Anthropic/DeepSeek/Google/Custom)
+  codey unset              Remove a provider's API key & configuration
+  codey model              View or switch the active model
+  codey config             Show current configuration
+  codey review             Review the latest commit in the local repo
+  codey review <commit>    Review a specific commit (hash/branch/tag)
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from codey.config.providers import ProviderPreset, all_presets, get_preset
 from codey.config.store import (
     Config,
     ConfigError,
+    delete_api_key,
     get_api_key,
     is_provider_configured,
     load_config,
@@ -150,6 +153,91 @@ def set_config():
     console.print("Run [bold]codey review[/] to review the latest commit.")
 
 
+# --- `codey unset` -------------------------------------------------------
+
+
+@app.command("unset")
+def unset_config(
+    provider: str = typer.Argument(
+        None,
+        help="Provider key to remove (e.g. openai, anthropic). If omitted, "
+        "lists configured providers and prompts.",
+        metavar="PROVIDER",
+    ),
+):
+    """Remove a provider's API key (and clear config if it is the active one)."""
+    presets = all_presets()
+
+    # Cache which providers currently have credentials available.
+    configured_map: dict[str, bool] = {p.key: is_provider_configured(p) for p in presets}
+
+    if provider is None:
+        # Interactive: show providers with configured credentials, pick one.
+        candidates = [p for p in presets if configured_map[p.key]]
+        if not candidates:
+            console.print("[yellow]No configured providers to remove.[/]")
+            raise typer.Exit(0)
+        console.print()
+        console.print("[bold]Configured providers:[/]")
+        for i, p in enumerate(candidates, 1):
+            active = " [green](active)[/]" if _is_active(p) else ""
+            console.print(f"  [cyan]{i}[/]. {p.label:<24} {badge_for(p, configured_map)}{active}")
+        console.print()
+        choice = IntPrompt.ask(
+            "Select a provider to remove",
+            default=1,
+            choices=[str(i) for i in range(1, len(candidates) + 1)],
+            console=console,
+        )
+        preset = candidates[choice - 1]
+    else:
+        preset = get_preset(provider)
+        if preset is None:
+            console.print(f"[red]Error:[/] unknown provider [bold]{provider}[/].")
+            console.print("[dim]Valid providers: " + ", ".join(p.key for p in presets) + "[/]")
+            raise typer.Exit(1)
+        if not configured_map[preset.key]:
+            console.print(f"[yellow]{preset.label} has no API key stored.[/]")
+            raise typer.Exit(0)
+
+    # Confirm removal.
+    if not Confirm.ask(f"Remove {preset.label} API key and configuration?", default=True, console=console):
+        console.print("[dim]Aborted.[/]")
+        raise typer.Exit(0)
+
+    # Delete the keyring entry.
+    delete_api_key(preset)
+    removed_active = False
+
+    # If this was the active provider, clear the config.
+    try:
+        cfg = load_config()
+    except ConfigError:
+        cfg = Config()
+    if cfg.provider == preset.key:
+        removed_active = True
+        save_config(Config())
+
+    console.print()
+    console.print(f"[green]✓[/] Removed {preset.label} API key from OS keyring.")
+    if removed_active:
+        if cfg.model:
+            console.print(f"[dim]Active model [bold]{cfg.model}[/] cleared.[/]")
+        console.print("[dim]Run [bold]codey set[/] to configure a new provider.[/]")
+
+
+def _is_active(preset: ProviderPreset) -> bool:
+    """True when the given preset is the currently active provider in config."""
+    try:
+        return load_config().provider == preset.key
+    except ConfigError:
+        return False
+
+
+def badge_for(preset: ProviderPreset, configured_map: dict[str, bool]) -> str:
+    return "[green]✓ configured[/]" if configured_map.get(preset.key) else "[dim]not set[/]"
+
+
 # --- `codey model` ------------------------------------------------------
 
 
@@ -249,15 +337,22 @@ def config_cmd():
 
 @app.command("review")
 def review_cmd(
+    commit: str = typer.Argument(
+        "HEAD",
+        help="Commit to review (hash, branch, tag, or 'HEAD'). Defaults to the latest commit.",
+        show_default=False,
+        metavar="COMMIT",
+    ),
     report: bool = typer.Option(False, "--report", "-r", help="View standalone agent reports after review."),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable live progress output."),
     force_index: bool = typer.Option(False, "--force-index", help="Force re-indexing of the repo."),
 ):
-    """Review the latest commit in the local repo."""
+    """Review a commit (latest by default) in the local repo."""
     from codey.cache.ast_cache import CacheDB
     from codey.llm.factory import build_llm, build_summarizer
     from codey.progress import ProgressEmitter, make_callback
     from codey.render.report import prompt_view_standalone, render_review
+    from codey.review.git import resolve_commit
     from codey.review.pipeline import run_pipeline
 
     # Validate config.
@@ -271,9 +366,25 @@ def review_cmd(
         raise typer.Exit(1) from e
 
     repo = Path.cwd()
+
+    # Validate the commit exists before doing anything expensive.
+    resolved = resolve_commit(repo, commit)
+    if resolved is None:
+        console.print(f"[red]Error:[/] commit [bold]{commit}[/] not found in this repository.")
+        console.print(
+            "[dim]Pass a valid commit hash, branch, or tag. "
+            "Use [bold]git log --oneline[/] to list recent commits.[/]"
+        )
+        raise typer.Exit(1)
+    short_hash = resolved[:12]
+
     console.print()
     console.print(f"[bold]Codey Review[/] — {repo.name}")
-    console.print(f"[dim]Model: {primary_resolved.model_name} | Summarizer: {summarizer_resolved.model_name}[/]")
+    console.print(
+        f"[dim]Commit: {short_hash}[/]"
+        f"  [dim]Model: {primary_resolved.model_name}"
+        f" | Summarizer: {summarizer_resolved.model_name}[/]"
+    )
     console.print()
 
     emitter = ProgressEmitter(console=console, enabled=not no_progress)
@@ -293,6 +404,7 @@ def review_cmd(
             primary_llm=primary_resolved.model,
             summarizer_llm=summarizer_resolved.model,
             progress_callback=cb,
+            commit=commit,
         )
     except Exception as e:
         emitter.emit_error("pipeline", str(e))

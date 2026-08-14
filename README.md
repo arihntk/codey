@@ -1,5 +1,9 @@
 # codey
 
+[![PyPI](https://img.shields.io/pypi/v/codey-review.svg)](https://pypi.org/project/codey-review/)
+[![Python](https://img.shields.io/pypi/pyversions/codey-review.svg)](https://pypi.org/project/codey-review/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Production-grade multi-agent AI code review system.**
 
 Codey orchestrates specialized agents — security, code quality, testing, and indexing — over your local git diff, with tree-sitter AST caching and jedi-based reverse-dependency lookup. Built on [LangGraph](https://github.com/langchain-ai/langgraph).
@@ -27,10 +31,16 @@ codey review   # review the latest commit in the local repo
 ## Install
 
 ```bash
-uv tool install codey
-# or
-pip install codey
+pip install codey-review
 ```
+
+Or with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install codey-review
+```
+
+> **Note:** The PyPI package name is `codey-review`, but the CLI command and Python import are both `codey`.
 
 ## Quickstart
 
@@ -102,6 +112,13 @@ uv sync
 uv run pytest tests/ -v
 uv run ruff check codey/
 ```
+
+## Package
+
+- **PyPI:** https://pypi.org/project/codey-review/
+- **Install:** `pip install codey-review`
+- **Python import:** `import codey`
+- **CLI command:** `codey --help`
 
 ## License
 

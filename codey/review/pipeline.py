@@ -43,8 +43,9 @@ def run_pipeline(
     progress_callback=None,
     diff_override: dict[str, str] | None = None,
     changed_files_override: list[str] | None = None,
+    commit: str = "HEAD",
 ) -> Any:
-    """Run the full review pipeline on the latest commit.
+    """Run the full review pipeline on the given commit.
 
     Args:
         repo_path: Path to the git repo.
@@ -54,6 +55,7 @@ def run_pipeline(
         progress_callback: Optional callback receiving graph stream chunks.
         diff_override: Override per-file diffs (skip git diff acquisition).
         changed_files_override: Override changed files list.
+        commit: Commit ref to review (defaults to ``HEAD``, i.e. the latest commit).
 
     Returns:
         PipelineResult wrapping the ReviewSummary and ReviewContext.
@@ -61,16 +63,16 @@ def run_pipeline(
     repo = Path(repo_path).resolve()
 
     # 1. Acquire diff + commit info.
-    commit = get_latest_commit(repo)
-    git_hash = commit.hash if commit else (git_head_hash(repo) or "unknown")
-    commit_message = commit.message if commit else ""
+    commit_info = get_latest_commit(repo, commit=commit)
+    git_hash = commit_info.hash if commit_info else (git_head_hash(repo) or "unknown")
+    commit_message = commit_info.message if commit_info else ""
 
     if diff_override is not None:
         diffs = diff_override
         changed_files = changed_files_override or list(diff_override.keys())
     else:
-        diffs = get_commit_diff(repo)
-        changed_files = get_changed_files(repo)
+        diffs = get_commit_diff(repo, commit=commit)
+        changed_files = get_changed_files(repo, commit=commit)
 
     if not diffs and not changed_files:
         changed_files = changed_files_override or []

@@ -1,4 +1,4 @@
-"""Compute diffs between HEAD and HEAD~1 and the list of changed files."""
+"""Compute diffs between a commit and its first parent and the list of changed files."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["CommitInfo", "get_latest_commit", "get_commit_diff", "get_changed_files"]
+__all__ = ["CommitInfo", "resolve_commit", "get_latest_commit", "get_commit_diff", "get_changed_files"]
 
 
 @dataclass
@@ -28,13 +28,23 @@ def _git(args: list[str], repo: Path) -> str:
     return proc.stdout if proc.returncode == 0 else ""
 
 
-def get_latest_commit(repo: Path) -> CommitInfo | None:
-    """Get the latest commit info (hash, message, author)."""
-    h = _git(["rev-parse", "HEAD"], repo).strip()
+def resolve_commit(repo: Path, ref: str) -> str | None:
+    """Resolve a commit ref to its full hash, or ``None`` if it doesn't exist.
+
+    Accepts any git revision spec accepted by ``git rev-parse``: a full or
+    abbreviated hash, a branch/tag name, ``HEAD``, ``HEAD~3``, etc.
+    """
+    h = _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], repo).strip()
+    return h or None
+
+
+def get_latest_commit(repo: Path, *, commit: str = "HEAD") -> CommitInfo | None:
+    """Get info (hash, message, author) for the given commit ref."""
+    h = _git(["rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], repo).strip()
     if not h:
         return None
-    msg = _git(["log", "-1", "--pretty=%s"], repo).strip()
-    author = _git(["log", "-1", "--pretty=%an"], repo).strip()
+    msg = _git(["log", "-1", "--pretty=%s", commit], repo).strip()
+    author = _git(["log", "-1", "--pretty=%an", commit], repo).strip()
     return CommitInfo(hash=h, message=msg, author=author)
 
 
@@ -47,7 +57,7 @@ def get_changed_files(repo: Path, *, commit: str = "HEAD") -> list[str]:
     else:
         # Initial commit: show all files in the commit.
         raw = _git(["show", "--name-only", "--pretty=format:", commit], repo)
-    return [line.strip() for line in raw.splitlines() if line.strip() and not line.startswith("comm" )]
+    return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
 def get_commit_diff(repo: Path, *, commit: str = "HEAD") -> dict[str, str]:

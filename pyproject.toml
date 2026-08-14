@@ -1,20 +1,35 @@
 [project]
-name = "codey"
+name = "codey-review"
 version = "0.1.0"
 description = "Production-grade multi-agent AI code review system"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.13"
-authors = [{ name = "Codey" }]
-keywords = ["code-review", "multi-agent", "langgraph", "tree-sitter", "static-analysis"]
+authors = [{ name = "Arihant" }]
+keywords = [
+    "code-review",
+    "multi-agent",
+    "langgraph",
+    "tree-sitter",
+    "static-analysis",
+    "security",
+    "bandit",
+    "llm",
+    "ai",
+    "code-quality",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
 ]
 dependencies = [
     "langgraph>=0.6.0",
@@ -24,8 +39,8 @@ dependencies = [
     "langchain-anthropic>=0.3.0",
     "langchain-google-genai>=2.0.0",
     "langchain-deepseek>=0.1.0",
-"tree-sitter>=0.26.0",
-"tree-sitter-language-pack>=1.14.0",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-language-pack>=1.14.0",
     "jedi>=0.19.0",
     "rich>=14.0.0",
     "typer>=0.16.0",
@@ -34,7 +49,6 @@ dependencies = [
     "bandit>=1.7.0",
     "rapidfuzz>=3.13.0",
     "gitpython>=3.1.0",
-    "tomli>=2.0.0; python_version<'3.11'",
 ]
 
 [project.scripts]
@@ -43,6 +57,9 @@ codey = "codey.cli:app"
 [project.urls]
 Homepage = "https://github.com/arihant/codey"
 Repository = "https://github.com/arihant/codey"
+Documentation = "https://github.com/arihant/codey#readme"
+"PyPI" = "https://pypi.org/project/codey-review/"
+Issues = "https://github.com/arihant/codey/issues"
 
 [build-system]
 requires = ["hatchling"]
