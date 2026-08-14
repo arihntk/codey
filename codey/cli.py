@@ -1,12 +1,14 @@
-"""Codey CLI — typer-based commands: set, unset, model, config, review.
+"""Codey CLI — typer-based commands for the multi-agent AI code review system.
 
 \\b
-  codey set                Configure provider & API key (OpenAI/Anthropic/DeepSeek/Google/Custom)
-  codey unset              Remove a provider's API key & configuration
-  codey model              View or switch the active model
-  codey config             Show current configuration
-  codey review             Review the latest commit in the local repo
-  codey review <commit>    Review a specific commit (hash/branch/tag)
+  codey set                  Configure provider & API key (OpenAI/Anthropic/DeepSeek/Google/Custom)
+  codey unset  [PROVIDER]    Remove a provider's API key & configuration
+  codey model                 View or switch the active model
+  codey config                Show current configuration
+  codey graph                 View the indexed code graph (symbols, calls, imports)
+  codey review                Review the latest commit (HEAD~1..HEAD)
+  codey review <commit>       Review a specific commit (hash/branch/tag)
+  codey review HEAD~2 --report   Review + view standalone agent reports
 """
 
 from __future__ import annotations
@@ -34,7 +36,16 @@ __all__ = ["app"]
 
 app = typer.Typer(
     name="codey",
-    help="Production-grade multi-agent AI code review system.",
+    help=(
+        "Production-grade multi-agent AI code review system.\n\n"
+        "Commands:\n"
+        "  set      Configure provider & API key\n"
+        "  unset    Remove a provider's API key & config\n"
+        "  model    View or switch the active model\n"
+        "  config   Show current configuration\n"
+        "  graph    View the indexed code graph (symbols, calls, imports)\n"
+        "  review   Review the latest commit (or a specific commit by hash/branch/tag)"
+    ),
     no_args_is_help=True,
     rich_markup_mode="rich",
     add_completion=False,
@@ -332,7 +343,281 @@ def config_cmd():
         raise typer.Exit(1) from e
 
 
-# --- `codey review` ----------------------------------------------------
+# --- `codey graph` ------------------------------------------------------
+
+
+@app.command("graph")
+def graph_cmd(
+    symbol: str = typer.Option(
+        None, "--symbol", "-s",
+        help="Filter to a specific symbol name (shows callers + callees).",
+        metavar="NAME",
+    ),
+    file_filter: str = typer.Option(
+        None, "--file", "-f",
+        help="Filter to a specific file path (relative to repo root).",
+        metavar="PATH",
+    ),
+    imports_only: bool = typer.Option(
+        False, "--imports", "-i",
+        help="Show only the import graph (which files import which modules).",
+    ),
+    stats_only: bool = typer.Option(
+        False, "--stats",
+        help="Show summary statistics only (no symbol/edge listings).",
+    ),
+):
+    """View the indexed code graph (symbols, call edges, import edges)."""
+    from codey.cache.ast_cache import CacheDB
+
+    repo = Path.cwd()
+    repo_str = str(repo.resolve())
+    db = CacheDB()
+
+    try:
+        git_hash = db.last_indexed_hash(repo_str)
+        if git_hash is None:
+            console.print(
+                "[yellow]No index found for this repository.[/]\n"
+                "[dim]Run [bold]codey review[/] first to build the index, "
+                "or run [bold]codey review --force-index[/] to re-index.[/]"
+            )
+            raise typer.Exit(1)
+
+        # Gather data.
+        symbols = db.all_symbols(repo_str, git_hash)
+        call_edges = db.all_call_edges(repo_str, git_hash)
+
+        # Import edges: query all via a direct SQL query.
+        from codey.cache.ast_cache import ImportEdge
+
+        rows = db.conn.execute(
+            "SELECT rel_path, module, imported_name, alias, line "
+            "FROM import_edges WHERE repo_path=? AND git_hash=?",
+            (repo_str, git_hash),
+        ).fetchall()
+        import_edges = [
+            ImportEdge(
+                rel_path=row["rel_path"],
+                module=row["module"],
+                imported_name=row["imported_name"],
+                alias=row["alias"],
+                line=row["line"],
+            )
+            for row in rows
+        ]
+
+        # --- Header ---
+        console.print()
+        console.print(Panel(
+            f"Repository:   [bold]{repo.name}[/]\n"
+            f"Git hash:     [dim]{git_hash[:12]}[/]\n"
+            f"Files:         {len(set(s.rel_path for s in symbols))}\n"
+            f"Symbols:       {len(symbols)}\n"
+            f"Call edges:    {len(call_edges)}\n"
+            f"Import edges:  {len(import_edges)}",
+            title="[bold]Codey Code Graph[/]",
+            border_style="cyan",
+        ))
+        console.print()
+
+        if stats_only:
+            return
+
+        # --- Symbol filter ---
+        if symbol is not None:
+            _render_symbol_detail(db, repo_str, git_hash, symbol, symbols, call_edges, console)
+            return
+
+        # --- Import-only mode ---
+        if imports_only:
+            _render_import_graph(import_edges, file_filter, console)
+            return
+
+        # --- Full graph: symbols by file + call edges ---
+        _render_symbol_tree(symbols, file_filter, console)
+        console.print()
+        _render_call_edges(call_edges, file_filter, console)
+    finally:
+        db.close()
+
+
+def _render_symbol_tree(
+    symbols: list,
+    file_filter: str | None,
+    console: Console,
+) -> None:
+    """Render symbols grouped by file as a rich tree."""
+    from rich.tree import Tree
+
+    # Group by file.
+    by_file: dict[str, list] = {}
+    for s in symbols:
+        if file_filter and s.rel_path != file_filter:
+            continue
+        by_file.setdefault(s.rel_path, []).append(s)
+
+    if not by_file:
+        console.print("[dim]No symbols found"
+                      + (f" in {file_filter}" if file_filter else "")
+                      + ".[/]")
+        return
+
+    tree = Tree(f"[bold cyan]Symbols[/] ({len(symbols)} total, {len(by_file)} files)")
+
+    _KIND_ICONS = {
+        "function": "fn",
+        "class": "cls",
+        "method": "m",
+        "variable": "var",
+        "import": "imp",
+    }
+
+    for fpath in sorted(by_file):
+        file_syms = sorted(by_file[fpath], key=lambda s: (s.line_start, s.kind))
+        file_branch = tree.add(f"[bold]{fpath}[/] [dim]({len(file_syms)} symbols)[/]")
+        for s in file_syms:
+            icon = _KIND_ICONS.get(s.kind, s.kind[:3])
+            file_branch.add(
+                f"[cyan]{icon}[/]  [bold]{s.name}[/]"
+                f"  [dim]L{s.line_start}-{s.line_end}[/]"
+            )
+
+    console.print(tree)
+
+
+def _render_call_edges(
+    call_edges: list,
+    file_filter: str | None,
+    console: Console,
+) -> None:
+    """Render call edges as a rich table."""
+    from rich.table import Table
+
+    edges = call_edges
+    if file_filter:
+        edges = [e for e in call_edges if e.caller_path == file_filter or e.callee_path == file_filter]
+
+    if not edges:
+        console.print("[dim]No call edges found"
+                      + (f" for {file_filter}" if file_filter else "")
+                      + ".[/]")
+        return
+
+    table = Table(title=f"Call Edges ({len(edges)})", show_lines=False)
+    table.add_column("Caller", style="cyan", overflow="fold")
+    table.add_column("Callee", style="bold", overflow="fold")
+    table.add_column("Callee File", style="dim", overflow="fold")
+    table.add_column("Line", justify="right", style="dim")
+
+    for e in edges[:500]:
+        callee_display = e.callee_qname or e.callee_name
+        table.add_row(
+            f"{e.caller_path}:{e.caller_qname}",
+            callee_display,
+            e.callee_path or "(external)",
+            str(e.line),
+        )
+    if len(edges) > 500:
+        console.print(f"[dim]... showing first 500 of {len(edges)} call edges[/]")
+
+    console.print(table)
+
+
+def _render_import_graph(
+    import_edges: list,
+    file_filter: str | None,
+    console: Console,
+) -> None:
+    """Render import edges as a rich tree."""
+    from rich.tree import Tree
+
+    edges = import_edges
+    if file_filter:
+        edges = [e for e in import_edges if e.rel_path == file_filter]
+
+    if not edges:
+        console.print("[dim]No import edges found"
+                      + (f" for {file_filter}" if file_filter else "")
+                      + ".[/]")
+        return
+
+    by_file: dict[str, list] = {}
+    for e in edges:
+        by_file.setdefault(e.rel_path, []).append(e)
+
+    tree = Tree(f"[bold cyan]Import Graph[/] ({len(edges)} edges, {len(by_file)} files)")
+    for fpath in sorted(by_file):
+        file_edges = sorted(by_file[fpath], key=lambda e: e.line)
+        branch = tree.add(f"[bold]{fpath}[/]")
+        for e in file_edges:
+            if e.imported_name:
+                label = f"from [bold]{e.module}[/] import [cyan]{e.imported_name}[/]"
+            else:
+                label = f"import [bold]{e.module}[/]"
+            if e.alias:
+                label += f" [dim]as {e.alias}[/]"
+            label += f"  [dim]L{e.line}[/]"
+            branch.add(label)
+
+    console.print(tree)
+
+
+def _render_symbol_detail(
+    db,
+    repo_str: str,
+    git_hash: str,
+    symbol_name: str,
+    symbols: list,
+    call_edges: list,
+    console: Console,
+) -> None:
+    """Render detailed info for a single symbol: callers + callees."""
+    from rich.table import Table
+
+    # Find matching symbols.
+    matches = [s for s in symbols if s.name == symbol_name or s.qualified_name == symbol_name]
+    if not matches:
+        console.print(f"[yellow]Symbol '{symbol_name}' not found in the index.[/]")
+        return
+
+    # Symbol definitions.
+    console.print(f"[bold]Symbol: [cyan]{symbol_name}[/][/]")
+    console.print()
+    for s in matches:
+        console.print(f"  [bold]{s.kind}[/]  {s.rel_path}  [dim]L{s.line_start}-{s.line_end}[/]")
+
+    # Callers (who calls this symbol).
+    callers = [e for e in call_edges if e.callee_name == symbol_name or e.callee_qname == symbol_name]
+    console.print()
+    if callers:
+        caller_table = Table(title=f"Callers ({len(callers)})", show_lines=False)
+        caller_table.add_column("File", style="cyan")
+        caller_table.add_column("Caller", style="bold")
+        caller_table.add_column("Line", justify="right", style="dim")
+        for e in callers:
+            caller_table.add_row(e.caller_path, e.caller_qname, str(e.line))
+        console.print(caller_table)
+    else:
+        console.print("[dim]No callers found.[/]")
+
+    # Callees (what does this symbol call).
+    callees = [e for e in call_edges if e.caller_qname == symbol_name]
+    console.print()
+    if callees:
+        callee_table = Table(title=f"Callees ({len(callees)})", show_lines=False)
+        callee_table.add_column("Callee", style="bold")
+        callee_table.add_column("Callee File", style="dim")
+        callee_table.add_column("Line", justify="right", style="dim")
+        for e in callees:
+            callee_table.add_row(
+                e.callee_qname or e.callee_name,
+                e.callee_path or "(external)",
+                str(e.line),
+            )
+        console.print(callee_table)
+    else:
+        console.print("[dim]No callees found.[/]")
 
 
 @app.command("review")
