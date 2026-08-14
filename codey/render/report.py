@@ -87,18 +87,19 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
     agent_table.add_column("Status", style="white")
     agent_table.add_column("Findings", justify="right")
     agent_table.add_column("Tokens", justify="right", style="dim")
-    agent_table.add_column("Summary", style="dim", overflow="fold")
+    agent_table.add_column("Summary", style="dim", overflow="fold", max_width=80)
 
     for name in ("index", "security", "code_quality", "test"):
         report = review.agent_reports.get(name)
         if not report:
             continue
+        summary_display = report.summary[:300] + ("..." if len(report.summary) > 300 else "")
         agent_table.add_row(
             report.agent,
             report.status,
             str(report.finding_count()),
             str(report.token_usage),
-            report.summary[:120] + ("..." if len(report.summary) > 120 else ""),
+            summary_display,
         )
     console.print(agent_table)
 
@@ -129,8 +130,38 @@ def print_finding_table(findings: list[Finding], *, console: Console | None = No
     console.print(table)
 
 
+def _print_detailed_findings(findings: list[Finding], *, console: Console) -> None:
+    """Print each finding with full description, evidence, and recommendation."""
+    sorted_findings = sorted(findings, key=lambda f: -severity_weight(f.severity))
+    for f in sorted_findings:
+        sev_label = Text(
+            f"[{_SEVERITY_ICON[f.severity]}] {f.severity.value.upper()}",
+            style=severity_style(f.severity),
+        )
+        loc = ""
+        if f.file_path and f.line_start:
+            loc = f"  [dim]{f.file_path}:{f.line_start}[/]"
+        console.print()
+        console.print(sev_label, end="")
+        console.print(f"  [cyan]{f.category.value.replace('_', ' ')}[/]", end="")
+        console.print(f"  [bold]{f.title}[/]", end="")
+        console.print(loc)
+        if f.confidence < 1.0:
+            console.print(f"  [dim]confidence: {f.confidence:.0%}[/]")
+        if f.description:
+            console.print(Markdown(f.description.strip()))
+        if f.evidence:
+            console.print()
+            console.print("[dim]Evidence:[/]")
+            console.print(Markdown(f"```\n{f.evidence.strip()}\n```"))
+        if f.recommendation:
+            console.print()
+            console.print("[green]Recommendation:[/]")
+            console.print(Markdown(f.recommendation.strip()))
+
+
 def render_agent_report(report: AgentReport, console: Console | None = None) -> None:
-    """Render a single agent's standalone report in detail."""
+    """Render a single agent's standalone report in full detail."""
     console = console or Console()
     title = f"{report.agent.title()} Agent Report"
     console.print(Panel(
@@ -145,7 +176,7 @@ def render_agent_report(report: AgentReport, console: Console | None = None) -> 
 
     console.print()
     if report.findings:
-        print_finding_table(report.findings, console=console)
+        _print_detailed_findings(report.findings, console=console)
     else:
         console.print("[dim]No findings.[/]")
 
@@ -156,7 +187,7 @@ def render_agent_report(report: AgentReport, console: Console | None = None) -> 
         meta_table.add_column(style="dim")
         meta_table.add_column(style="white", overflow="fold")
         for k, v in report.metadata.items():
-            val = v[:200] + ("..." if len(v) > 200 else "") if v else ""
+            val = v[:500] + ("..." if len(v) > 500 else "") if v else ""
             meta_table.add_row(k, val)
         console.print(meta_table)
 

@@ -628,7 +628,10 @@ def review_cmd(
         show_default=False,
         metavar="COMMIT",
     ),
-    report: bool = typer.Option(False, "--report", "-r", help="View standalone agent reports after review."),
+    report: bool = typer.Option(
+        False, "--report", "-r",
+        help="Skip prompt and view standalone agent reports after review.",
+    ),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable live progress output."),
     force_index: bool = typer.Option(False, "--force-index", help="Force re-indexing of the repo."),
 ):
@@ -708,8 +711,23 @@ def review_cmd(
     console.print()
     render_review(result.review, console=console)
 
+    # Always offer to view full agent reports (uses the already-computed review — no re-run).
     if report:
         prompt_view_standalone(result.review, console=console)
+    else:
+        _maybe_view_reports(result.review, console=console)
+
+
+def _maybe_view_reports(review, console: Console) -> None:
+    """Prompt the user to view full agent reports from the completed review."""
+    from codey.render.report import prompt_view_standalone
+
+    if not review.agent_reports:
+        return
+    console.print()
+    if not Confirm.ask("View full agent reports?", default=False, console=console):
+        return
+    prompt_view_standalone(review, console=console)
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
