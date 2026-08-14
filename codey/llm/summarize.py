@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codey.llm.factory import ResolvedLLM, estimate_tokens
+from codey.llm.retry import invoke_with_retry
 
 __all__ = ["DiffSummary", "summarize_diff", "summarize_diffs"]
 
@@ -46,11 +47,17 @@ def summarize_diff(
     truncated = diff_text[: max_chars * 2]  # leave room for long truncation
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    response = summarizer.model.invoke([
-        SystemMessage(content=_SUMMARY_SYSTEM),
-        HumanMessage(content=f"File: {path}\n\n```diff\n{truncated}\n```"),
-    ])
-    summary = response.content if isinstance(response.content, str) else str(response.content)
+    try:
+        response = invoke_with_retry(
+            summarizer.model,
+            [
+                SystemMessage(content=_SUMMARY_SYSTEM),
+                HumanMessage(content=f"File: {path}\n\n```diff\n{truncated}\n```"),
+            ],
+        )
+        summary = response.content if isinstance(response.content, str) else str(response.content)
+    except Exception:
+        summary = truncated
     return DiffSummary(path=path, summary=summary, token_estimate=estimate_tokens(summary))
 
 
