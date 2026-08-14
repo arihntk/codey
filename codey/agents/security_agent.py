@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 from codey.agents.context import ReviewContext
+from codey.agents.evidence import attach_evidence
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
@@ -45,12 +46,16 @@ _SECURITY_SYSTEM = (
     "- category: security\n"
     "- severity: critical/high/medium/low/info\n"
     "- title: short description\n"
-    "- description: what the vulnerability is\n"
-    "- file_path and line_start\n"
-    "- evidence: the relevant code or tool output\n"
+    "- description: what the vulnerability is and why it matters\n"
+    "- file_path and line_start (from the tool output)\n"
+    "- evidence: VERBATIM copy of the relevant code line or tool output snippet "
+    "that proves the issue exists — never fabricate evidence\n"
     "- recommendation: how to fix it\n"
-    "- confidence: 0.0-1.0\n"
-    "Only report genuine issues. Deduplicate. If no issues, say 'No security issues found.' "
+    "- confidence: 0.0-1.0\n\n"
+    "CRITICAL: Every finding MUST include evidence copied from the tool output "
+    "or diff. Findings without verbatim evidence will be discarded. "
+    "Only report genuine issues grounded in the provided data. Deduplicate. "
+    "If no issues, output an empty array []."
     "Output as a JSON array of finding objects."
 )
 
@@ -104,19 +109,41 @@ def run_security_agent(
             findings = refined
 
     if not findings:
+        tools_run = [k for k in raw_results] or ["none (no security tools available)"]
+        tool_evidence = "; ".join(f"{k}: 0 issues" for k in raw_results) or "no tools ran"
         findings.append(Finding(
             category=FindingCategory.SECURITY,
             severity=Severity.INFO,
             title="No security issues found",
-            description="No security vulnerabilities detected by automated tools or LLM review.",
+            description=(
+                f"No security vulnerabilities detected by automated tools or LLM review. "
+                f"Scanned {len(all_relevant)} file(s) with {', '.join(tools_run)}."
+            ),
+            evidence=tool_evidence,
             confidence=0.8,
         ))
 
+    # Attach verbatim diff evidence to any LLM findings that lack it.
+    attach_evidence(findings, ctx)
+
     tools_used = [k for k in raw_results] or ["none (no security tools available)"]
+    finding_details = "; ".join(
+        f"{f.title} [{f.severity.value}]"
+        + (f" at {f.file_path}:{f.line_start}" if f.file_path else "")
+        for f in findings
+        if f.severity != Severity.INFO
+    )
+    summary = (
+        f"Security scan using {', '.join(tools_used)}. "
+        f"Scanned {len(all_relevant)} file(s). "
+        f"Found {len(findings)} finding(s)."
+    )
+    if finding_details:
+        summary += f" Issues: {finding_details}."
     return AgentReport(
         agent="security",
         status="completed",
-        summary=f"Security scan using {', '.join(tools_used)}. Found {len(findings)} finding(s).",
+        summary=summary,
         findings=findings,
         metadata={k: v[:2000] for k, v in raw_results.items()},
         token_usage=token_usage,
@@ -327,6 +354,7 @@ def _parse_llm_findings(text: str) -> list[Finding]:
     findings: list[Finding] = []
     for item in data:
         try:
+            evidence = item.get("evidence", "")
             findings.append(Finding(
                 category=FindingCategory.SECURITY,
                 severity=Severity(item.get("severity", "info").lower()),
@@ -335,7 +363,7 @@ def _parse_llm_findings(text: str) -> list[Finding]:
                 file_path=item.get("file_path"),
                 line_start=item.get("line_start"),
                 line_end=item.get("line_end"),
-                evidence=item.get("evidence", ""),
+                evidence=evidence,
                 recommendation=item.get("recommendation", ""),
                 confidence=float(item.get("confidence", 0.7)),
             ))

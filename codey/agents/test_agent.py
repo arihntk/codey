@@ -175,6 +175,7 @@ def run_test_agent(
                 severity=Severity.INFO,
                 title=f"Tests passed ({framework})",
                 description=f"All tests for '{' '.join(full_cmd)}' passed.",
+                evidence=stdout[:2000] if stdout else f"Command '{' '.join(full_cmd)}' exited 0",
                 confidence=1.0,
             ))
         else:
@@ -190,10 +191,20 @@ def run_test_agent(
             ))
 
     passed = sum(1 for f in findings if f.severity == Severity.INFO)
+    failed = len(findings) - passed
+    framework_names = ", ".join(fw for fw, _ in frameworks)
+    summary = f"Ran {len(frameworks)} test framework(s) [{framework_names}]. {passed} passed, {failed} failed."
+    if failed:
+        failed_details = "; ".join(
+            f.title for f in findings if f.severity == Severity.HIGH
+        )
+        if failed_details:
+            summary += f" Failures: {failed_details}."
+
     return AgentReport(
         agent="test",
         status="completed",
-        summary=f"Ran {len(frameworks)} test framework(s). {passed}/{len(findings)} passed.",
+        summary=summary,
         findings=findings,
         metadata=metadata,
         token_usage=token_usage,

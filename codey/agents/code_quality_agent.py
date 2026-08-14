@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from codey.agents.context import ReviewContext
+from codey.agents.evidence import attach_evidence
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
@@ -27,7 +28,11 @@ _QUALITY_SYSTEM = (
     "6. Architectural alignment (does it follow the module structure?)\n\n"
     "For each issue, output a JSON object with:\n"
     "  severity, title, description, file_path, line_start, line_end, evidence,\n"
-    "  recommendation, confidence\n"
+    "  recommendation, confidence\n\n"
+    "CRITICAL: The 'evidence' field MUST contain a VERBATIM copy of the specific "
+    "code line(s) from the diff that demonstrates the issue. Do not fabricate "
+    "or paraphrase evidence — quote the actual code. Findings without verbatim "
+    "evidence will be discarded.\n"
     "Use category 'code_quality'. If the code meets benchmarks, output an empty "
     "array []. Output only a JSON array."
 )
@@ -89,14 +94,36 @@ def run_code_quality_agent(
             category=FindingCategory.CODE_QUALITY,
             severity=Severity.INFO,
             title="Code meets quality benchmarks",
-            description="No quality issues detected. The change follows established codebase conventions.",
+            description=(
+                f"No quality issues detected. Reviewed {len(ctx.diff_chunks)} diff chunk(s) "
+                f"across {len(ctx.changed_files)} file(s) against architecture conventions. "
+                f"Checked {len(ctx.dependent_files)} dependent file(s)."
+            ),
+            evidence=diff_text[:500] if diff_text else "",
             confidence=0.7,
         ))
+
+    # Attach verbatim diff evidence to any LLM findings that lack it.
+    attach_evidence(findings, ctx)
+
+    finding_details = "; ".join(
+        f"{f.title} [{f.severity.value}]"
+        + (f" at {f.file_path}:{f.line_start}" if f.file_path else "")
+        for f in findings
+        if f.severity != Severity.INFO
+    )
+    summary = (
+        f"Quality analysis of {len(ctx.changed_files)} file(s) "
+        f"({len(ctx.diff_chunks)} diff chunks, {len(ctx.dependent_files)} dependent files). "
+        f"Found {len(findings)} finding(s)."
+    )
+    if finding_details:
+        summary += f" Issues: {finding_details}."
 
     return AgentReport(
         agent="code_quality",
         status="completed",
-        summary=f"Quality analysis of {len(ctx.changed_files)} file(s). Found {len(findings)} finding(s).",
+        summary=summary,
         findings=findings,
         metadata={
             "diff_chunks": str(len(ctx.diff_chunks)),

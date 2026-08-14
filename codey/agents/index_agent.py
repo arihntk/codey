@@ -24,7 +24,10 @@ _INDEX_SYSTEM = (
     "symbol table, produce a concise architecture summary:\n"
     "1. Entry points and module structure\n"
     "2. Design patterns and conventions observed\n"
-    "3. Code quality benchmarks (naming, typing, docstring coverage)\n"
+    "3. Code quality benchmarks (naming, typing, docstring coverage)\n\n"
+    "CRITICAL: Cite specific file paths and symbol names from the provided "
+    "symbol table as evidence for each observation. Do not fabricate file "
+    "paths or symbols that are not in the input.\n"
     "Output 5-10 bullet points. Be specific, cite file paths."
 )
 
@@ -75,8 +78,10 @@ def run_index_agent(
         description=(
             f"Indexed {index_result.total_files} files "
             f"({index_result.parsed_files} parsed, {index_result.reused_files} cached). "
-            f"Extracted {index_result.symbols_extracted} symbols."
+            f"Extracted {index_result.symbols_extracted} symbols across "
+            f"{len(set(s.rel_path for s in db.all_symbols(str(repo), index_result.git_hash)))} files."
         ),
+        evidence=overview[:1000] if overview else "",
         file_path=None,
         confidence=1.0,
     ))
@@ -84,7 +89,10 @@ def run_index_agent(
     report = AgentReport(
         agent="index",
         status="completed",
-        summary=index_summary[:500],
+        summary=index_summary[:500] if index_summary else (
+            f"Indexed {index_result.total_files} files, "
+            f"{index_result.symbols_extracted} symbols."
+        ),
         findings=findings,
         metadata={
             "git_hash": index_result.git_hash,
