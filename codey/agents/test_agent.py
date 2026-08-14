@@ -15,6 +15,7 @@ from pathlib import Path
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_test_agent"]
 
@@ -135,7 +136,7 @@ def run_test_agent(
             from langchain_core.messages import HumanMessage, SystemMessage
 
             changed = ", ".join(ctx.changed_files[:20])
-            response = llm.invoke([
+            response = invoke_with_retry(llm, [
                 SystemMessage(content=(
                     "You are a test expert. Given the files changed in a commit, "
                     "determine which specific test files or directories should be run. "

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_security_agent"]
 
@@ -277,7 +278,7 @@ def _llm_synthesise(llm: object, raw_results: dict[str, str], diff: str, changed
     diff_excerpt = diff[:8000] if diff else "(no diff)"
     files_str = ", ".join(changed_files[:30])
     try:
-        response = llm.invoke([
+        response = invoke_with_retry(llm, [
             SystemMessage(content=_SECURITY_SYSTEM),
             HumanMessage(content=(
                 f"Changed files: {files_str}\n\n"
@@ -302,7 +303,7 @@ def _llm_scan_diff(llm: object, diff: str, changed_files: list[str]) -> str:
         "If truly no issues, output []."
     )
     try:
-        response = llm.invoke([
+        response = invoke_with_retry(llm, [
             SystemMessage(content=_SECURITY_SYSTEM + "\n\n" + prompt),
             HumanMessage(content=f"Changed files: {files_str}\n\nDiff:\n```diff\n{diff_excerpt}\n```"),
         ])

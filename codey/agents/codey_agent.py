@@ -22,6 +22,7 @@ from codey.agents.schemas import (
     Severity,
     aggregate_severity,
 )
+from codey.llm.retry import invoke_with_retry
 from codey.tools.shell import build_tools_for_agents
 
 __all__ = ["run_codey_agent", "spawn_retrieval_subagent"]
@@ -154,7 +155,7 @@ def _llm_synthesise(
         })
 
     try:
-        response = llm.invoke([
+        response = invoke_with_retry(llm, [
             SystemMessage(content=_SYNTHESIS_SYSTEM),
             HumanMessage(content=(
                 f"Commit: {ctx.commit_message[:500]}\n"

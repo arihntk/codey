@@ -14,6 +14,7 @@ from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.cache.ast_cache import CacheDB
 from codey.index.callgraph import build_call_graph
 from codey.index.indexer import index_repository
+from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_index_agent"]
 
@@ -51,7 +52,7 @@ def run_index_agent(
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
 
-            response = llm.invoke([
+            response = invoke_with_retry(llm, [
                 SystemMessage(content=_INDEX_SYSTEM),
                 HumanMessage(content=f"Repository: {repo.name}\n\n{overview}"),
             ])

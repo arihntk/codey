@@ -11,6 +11,7 @@ import json
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_code_quality_agent"]
 
@@ -63,7 +64,7 @@ def run_code_quality_agent(
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        response = llm.invoke([
+        response = invoke_with_retry(llm, [
             SystemMessage(content=_QUALITY_SYSTEM),
             HumanMessage(content=(
                 f"## Codebase conventions\n{arch_context}\n\n"
