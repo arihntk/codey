@@ -15,6 +15,7 @@ from pathlib import Path
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_security_agent"]
@@ -287,7 +288,7 @@ def _llm_synthesise(llm: object, raw_results: dict[str, str], diff: str, changed
                 "Output the findings as a JSON array:"
             )),
         ])
-        return response.content if isinstance(response.content, str) else str(response.content)
+        return extract_text(response)
     except Exception as e:
         return f"[] // LLM synthesis failed: {e}"
 
@@ -307,7 +308,7 @@ def _llm_scan_diff(llm: object, diff: str, changed_files: list[str]) -> str:
             SystemMessage(content=_SECURITY_SYSTEM + "\n\n" + prompt),
             HumanMessage(content=f"Changed files: {files_str}\n\nDiff:\n```diff\n{diff_excerpt}\n```"),
         ])
-        return response.content if isinstance(response.content, str) else str(response.content)
+        return extract_text(response)
     except Exception as e:
         return f"[] // LLM scan failed: {e}"
 

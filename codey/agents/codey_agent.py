@@ -22,6 +22,7 @@ from codey.agents.schemas import (
     Severity,
     aggregate_severity,
 )
+from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
 from codey.tools.shell import build_tools_for_agents
 
@@ -164,7 +165,7 @@ def _llm_synthesise(
                 f"Agent reports:\n{json.dumps(report_data, indent=2)}"
             )),
         ])
-        raw = response.content if isinstance(response.content, str) else str(response.content)
+        raw = extract_text(response)
         text = raw.strip()
         if text.startswith("```"):
             lines = text.split("\n")
@@ -203,7 +204,7 @@ def spawn_retrieval_subagent(
         messages = result.get("messages", [])
         if messages:
             last = messages[-1]
-            return last.content if hasattr(last, "content") else str(last)
+            return extract_text(last)
     except Exception as e:
         return f"[retrieval subagent failed: {e}]"
     return ""

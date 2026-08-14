@@ -15,6 +15,7 @@ from pathlib import Path
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_test_agent"]
@@ -145,7 +146,7 @@ def run_test_agent(
                 )),
                 HumanMessage(content=f"Changed files: {changed}\n\nRepository root: {repo.name}"),
             ])
-            raw = response.content if isinstance(response.content, str) else str(response.content)
+            raw = extract_text(response)
             text = raw.strip()
             if text.startswith("```"):
                 lines = text.split("\n")

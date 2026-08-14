@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codey.llm.factory import ResolvedLLM, estimate_tokens
+from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["DiffSummary", "summarize_diff", "summarize_diffs"]
@@ -55,7 +56,7 @@ def summarize_diff(
                 HumanMessage(content=f"File: {path}\n\n```diff\n{truncated}\n```"),
             ],
         )
-        summary = response.content if isinstance(response.content, str) else str(response.content)
+        summary = extract_text(response)
     except Exception:
         summary = truncated
     return DiffSummary(path=path, summary=summary, token_estimate=estimate_tokens(summary))

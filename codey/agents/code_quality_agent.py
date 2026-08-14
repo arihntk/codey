@@ -11,6 +11,7 @@ import json
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_code_quality_agent"]
@@ -71,7 +72,7 @@ def run_code_quality_agent(
                 f"## Changes to review\n{diff_text}"
             )),
         ])
-        raw = response.content if isinstance(response.content, str) else str(response.content)
+        raw = extract_text(response)
         token_usage = len(raw) // 4
         findings = _parse_llm_findings(raw)
     except Exception as e:
