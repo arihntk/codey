@@ -123,16 +123,19 @@ def run_review(
     graph = build_graph()
     state = initial_state(ctx, primary_llm=primary_llm, summarizer_llm=summarizer_llm)
 
+    final_state: ReviewState = state
     if progress_callback is not None:
-        for chunk in graph.stream(state, stream_mode="updates"):
-            progress_callback(chunk)
+        for mode, payload in graph.stream(state, stream_mode=["updates", "values"]):
+            if mode == "updates":
+                progress_callback(payload)
+            elif mode == "values":
+                final_state = payload
     else:
-        state = graph.invoke(state)
+        final_state = graph.invoke(state)
 
-    result = state if isinstance(state, dict) else dict(state)
+    result = final_state if isinstance(final_state, dict) else dict(final_state)
     review: ReviewSummary | None = result.get("final_review")
     if review is None:
-        # Fallback: synthesise manually if the orchestrator somehow didn't run.
         reports = result.get("agent_reports", {})
         review = run_codey_agent(ctx, reports, primary_llm, repo_for_subagents=ctx.repo_path)
     return review
