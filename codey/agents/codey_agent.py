@@ -34,7 +34,11 @@ _SYNTHESIS_SYSTEM = (
     "them into a final review. Your output must be a JSON object with:\n"
     '  "overall_severity": "critical|high|medium|low|info"\n'
     '  "summary": "2-3 paragraph executive summary in markdown"\n'
-    '  "recommendation": "approve|request_changes|block"\n'
+    '  "recommendation": "approve|request_changes|block"\n\n'
+    "CRITICAL: Your summary MUST reference concrete evidence from the agent "
+    "reports — cite specific findings, tool outputs, file paths, and test "
+    "results to prove the review is grounded in actual analysis. Do not make "
+    "claims that are not supported by the provided agent reports. "
     "Consider the severity and confidence of each finding. Don't repeat findings; "
     "instead provide an actionable executive assessment."
 )
@@ -145,13 +149,14 @@ def _llm_synthesise(
                 {
                     "severity": f.severity.value,
                     "title": f.title,
+                    "description": f.description[:500],
                     "file": f.file_path,
                     "line": f.line_start,
+                    "evidence": f.evidence[:500] if f.evidence else "",
                     "confidence": f.confidence,
                     "recommendation": f.recommendation,
                 }
                 for f in r.findings
-                if f.severity != Severity.INFO
             ],
         })
 
