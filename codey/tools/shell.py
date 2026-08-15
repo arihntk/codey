@@ -12,6 +12,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from codey.process import scrubbed_env
+
 __all__ = [
     "ShellResult",
     "run_grep",
@@ -74,6 +76,7 @@ def _run(args: list[str], *, cwd: Path, timeout: int = 30) -> ShellResult:
             text=True,
             timeout=timeout,
             check=False,
+            env=scrubbed_env(),
         )
         stdout = proc.stdout[:_MAX_OUTPUT]
         if len(proc.stdout) > _MAX_OUTPUT:

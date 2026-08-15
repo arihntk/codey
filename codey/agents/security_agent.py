@@ -33,6 +33,7 @@ from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.agents.secrets import detect_hardcoded_secrets
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
+from codey.process import scrubbed_env
 
 __all__ = ["run_security_agent"]
 
@@ -130,7 +131,7 @@ def run_security_agent(
     semgrep_findings = _run_semgrep(repo, all_relevant)
     if semgrep_findings is not None:
         raw_results["semgrep"] = semgrep_findings
-    gitleaks_findings = _run_gitleaks(repo)
+    gitleaks_findings = _run_gitleaks(repo, commit=ctx.git_hash)
     if gitleaks_findings is not None:
         raw_results["gitleaks"] = gitleaks_findings
 
@@ -235,9 +236,12 @@ def _run_bandit(repo: Path, py_files: list[str]) -> str:
     if not shutil.which("bandit"):
         return ""
     try:
-        cmd = ["bandit", "-f", "json", "-q"] + py_files
+        # '--' separates options from file paths so repo filenames that begin
+        # with '-' can't be interpreted as flags.
+        cmd = ["bandit", "-f", "json", "-q", "--"] + py_files
         proc = subprocess.run(
             cmd, cwd=str(repo), capture_output=True, text=True, timeout=60, check=False,
+            env=scrubbed_env(),
         )
         if proc.returncode in (0, 1):  # 1 = issues found, still valid output
             return proc.stdout
@@ -278,11 +282,14 @@ def _run_semgrep(repo: Path, files: list[str]) -> str | None:
     if not files:
         return None
     try:
-        cmd = ["semgrep", "--json", "--quiet", "--no-rewrite-rule-ids"]
+        # '--' separates options from file paths so repo filenames that begin
+        # with '-' can't be interpreted as flags.
+        cmd = ["semgrep", "--json", "--quiet", "--no-rewrite-rule-ids", "--"]
         # scan changed paths
         cmd.extend(files[:50])
         proc = subprocess.run(
             cmd, cwd=str(repo), capture_output=True, text=True, timeout=90, check=False,
+            env=scrubbed_env(),
         )
         if proc.returncode in (0, 1):
             return proc.stdout
@@ -321,14 +328,30 @@ def _parse_semgrep_json(raw: str) -> list[Finding]:
 # --- Gitleaks ----
 
 
-def _run_gitleaks(repo: Path) -> str | None:
+def _run_gitleaks(repo: Path, *, commit: str = "HEAD") -> str | None:
     if not shutil.which("gitleaks"):
         return None
     try:
-        # Scan unstaged + staged changes (diff).
+        # Scan only the commit under review (diff vs its parent), not the
+        # entire working tree — pre-existing secrets in unrelated files must
+        # not be attributed to this review. Falls back to a plain tree scan
+        # if log-opts isn't supported by the installed gitleaks.
+        log_opts = f"{commit}~1..{commit}"
+        if commit == "HEAD":
+            import subprocess as _sp
+
+            head = _sp.run(
+                ["git", "rev-parse", "--verify", "--quiet", "HEAD~1"],
+                cwd=str(repo), capture_output=True, text=True, timeout=15, check=False,
+            )
+            if head.returncode != 0:
+                log_opts = commit  # initial commit has no parent
         proc = subprocess.run(
-            ["gitleaks", "detect", "--source", str(repo), "--no-git", "--report-format", "json", "--report-path", "-"],
+            ["gitleaks", "detect", "--source", str(repo),
+             "--log-opts", log_opts,
+             "--report-format", "json", "--report-path", "-"],
             cwd=str(repo), capture_output=True, text=True, timeout=60, check=False,
+            env=scrubbed_env(),
         )
         if proc.returncode in (0, 1):
             return proc.stdout

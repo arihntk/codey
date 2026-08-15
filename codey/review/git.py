@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from codey.process import scrubbed_env
+
 __all__ = [
     "CommitInfo",
     "resolve_commit",
@@ -34,6 +36,7 @@ def _git(args: list[str], repo: Path) -> str:
         text=True,
         timeout=15,
         check=False,
+        env=scrubbed_env(),
     )
     return proc.stdout if proc.returncode == 0 else ""
 
@@ -47,6 +50,7 @@ def _git_proc(args: list[str], repo: Path, *, input_text: str | None = None) -> 
         capture_output=True,
         timeout=15,
         check=False,
+        env=scrubbed_env(),
     )
 
 

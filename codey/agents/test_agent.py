@@ -17,6 +17,7 @@ from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
+from codey.process import scrubbed_env
 
 __all__ = ["run_test_agent"]
 
@@ -88,6 +89,7 @@ def _run_tests(repo: Path, command: list[str]) -> tuple[bool, str, str]:
             text=True,
             timeout=_TEST_RUN_TIMEOUT,
             check=False,
+            env=scrubbed_env(),
         )
         return proc.returncode == 0, proc.stdout[:20_000], proc.stderr[:20_000]
     except subprocess.TimeoutExpired:

@@ -8,7 +8,6 @@ same provider but a smaller/faster model tier.
 from __future__ import annotations
 
 import importlib
-import os
 from dataclasses import dataclass
 
 from codey.config.providers import ProviderPreset
@@ -40,7 +39,13 @@ def _instantiate(
     api_key: str,
     base_url: str | None,
 ) -> object:
-    """Import the langchain chat class lazily and instantiate it."""
+    """Import the langchain chat class lazily and instantiate it.
+
+    The API key is passed to the client constructor directly. It is NEVER
+    written into ``os.environ`` — the security/test agents spawn subprocesses
+    that execute repo code, and a malicious repo could exfiltrate an
+    env-injected key.
+    """
     module = importlib.import_module(preset.langchain_module)
     cls = getattr(module, preset.langchain_class)
 
@@ -62,17 +67,11 @@ def _instantiate(
         return cls(**kwargs)
 
 
-def _ensure_api_key_in_env(preset: ProviderPreset, api_key: str) -> None:
-    """Some langchain providers read the key from env; set it for this process."""
-    os.environ[preset.env_key_var] = api_key
-
-
 def build_llm(cfg: Config | None = None) -> ResolvedLLM:
     """Build the primary review LLM from stored config."""
     cfg = cfg or load_config()
     preset, api_key, base_url = resolve_provider(cfg)
     model_name = cfg.model or preset.default_model
-    _ensure_api_key_in_env(preset, api_key)
     model = _instantiate(preset, model_name=model_name, api_key=api_key, base_url=base_url)
     return ResolvedLLM(
         model=model,
@@ -88,7 +87,6 @@ def build_summarizer(cfg: Config | None = None) -> ResolvedLLM:
     cfg = cfg or load_config()
     preset, api_key, base_url = resolve_provider(cfg)
     model_name = cfg.summarizer_model or preset.summarizer_model or preset.default_model
-    _ensure_api_key_in_env(preset, api_key)
     model = _instantiate(preset, model_name=model_name, api_key=api_key, base_url=base_url)
     return ResolvedLLM(
         model=model,
