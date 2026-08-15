@@ -53,7 +53,7 @@ def _enclosing_qname(line: int, scoped_symbols: list[SymbolRecord]) -> str:
 
 
 def _module_name_for_path(repo: Path, file_path: Path) -> str:
-    """Derive the Python module name for a file path (e.g. codey/tools -> codey.tools)."""
+    """Derive the Python module name for a file path (e.g. codey/agents -> codey.agents)."""
     try:
         rel = file_path.relative_to(repo)
     except ValueError:
