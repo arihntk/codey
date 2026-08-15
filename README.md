@@ -17,16 +17,17 @@ codey review   # review the latest commit in the local repo
 
 ## Features
 
-- **Multi-agent review**: LangGraph supervisor fans out to 4 specialist agents in parallel, each emitting a structured standalone report
+- **Multi-agent review**: LangGraph DAG fans out to 4 specialist agents in parallel, each emitting a structured report
 - **AST-aware caching**: tree-sitter parses files once; subsequent runs diff against the last git-hash and re-parse only changed files (sqlite at `~/.cache/codey/codey.db`)
 - **Reverse-dependency lookup** (Python v1): jedi call graph finds files that import or call into changed code, sending affected-but-unmodified chunks to the LLM for verification
 - **AST-aware diff chunking**: large diffs are broken into function/class-level chunks mapped via the cached symbol table
-- **Context window budgeting**: cheap/fast summarizer model condenses very large diffs; chunks are pruned to fit the model's token budget
-- **Security analysis**: runs `bandit` (Python), `semgrep` (multi-language), `gitleaks` (secrets) — skips files that obviously don't affect security (css, images, lock files); LLM synthesizes raw tool output into structured findings
+- **Context window budgeting**: cheap/fast summarizer model condenses very large diffs; chunks are pruned to fit the model's token budget, and pruned ranges are reported — never silently dropped
+- **Security analysis**: deterministic hardcoded-secret detector (prefix rules + entropy) + `bandit` (Python), `semgrep` (multi-language), `gitleaks` (secrets, scoped to the commit) + LLM confidentiality judgement; the deterministic detector scans the raw diff, never an LLM summary
 - **Code quality benchmarking**: compares the diff against the indexed codebase's architecture/design conventions
-- **Test execution**: auto-detects the test framework (pytest, npm, go, cargo, rake); skips cleanly if no test suite is identifiable
+- **Test execution**: auto-detects the test framework (pytest, npm, go, cargo, rake); opt-in via `--run-tests` with confirmation — never executes repo code implicitly
 - **Live progress**: rich terminal updates as each agent starts and finishes
-- **Rich rendering**: final summary as markdown with severity-coloured findings table; interactive standalone report viewer (`--report`)
+- **Rich rendering**: final summary as markdown with severity-coloured findings table; machine-readable `--json` output for CI
+- **Commit-message integration**: optionally appends the generated summary to the reviewed commit's description (global setting, plain-text, HEAD only)
 
 ## Install
 
@@ -60,13 +61,13 @@ codey review   # review the latest commit (HEAD~1..HEAD)
 │     reverse-dep lookup ──► dependent file sources         │
 │                  │                                       │
 │         ┌────────▼─────────┐                             │
-│         │   LangGraph supervisor                         │
+│         │    LangGraph DAG │                             │
 │         │  ┌─────────────┐ │                             │
 │         │  │ IndexAgent  │─┼──► architecture summary     │
 │         │  └──────┬──────┘ │                             │
 │         │         │        │  (parallel fan-out)         │
 │         │  ┌──────▼──────┐ │                             │
-│         │  │SecurityAgnt │ │ ─► bandit/semgrep/gitleaks  │
+│         │  │SecurityAgnt │ │ ─► detector+bandit+semgrep  │
 │         │  │CodeQualitAgt│ │ ─► convention benchmarks    │
 │         │  │ TestAgent   │ │ ─► pytest/npm/go/cargo      │
 │         │  └──────┬──────┘ │                             │
@@ -76,7 +77,7 @@ codey review   # review the latest commit (HEAD~1..HEAD)
 │         │  └─────────────┘  │  (markdown + recommendation)│
 │         └──────────────────┘                              │
 │                  │                                       │
-│          rich terminal render                             │
+│          rich render / --json                             │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -85,10 +86,10 @@ codey review   # review the latest commit (HEAD~1..HEAD)
 | Agent | Role | LLM | Tools | Skips |
 |-------|------|-----|-------|-------|
 | **index** | Repo indexer + architecture summary | ✓ | tree-sitter, jedi | — |
-| **security** | Vulnerability & secret detection | ✓ | bandit, semgrep, gitleaks | css, md, images, fonts, lock files |
+| **security** | Vulnerability & secret detection | ✓ | secret detector, bandit, semgrep, gitleaks | css, md, images, fonts, lock files |
 | **code_quality** | Convention & pattern benchmarks | ✓ | — | when no diff provided |
-| **test** | Test suite identification & execution | ✓ | pytest, npm, go, cargo, rake | when no framework detectable |
-| **codey** (supervisor) | Executive synthesis + retrieval | ✓ | grep, cat, ls, git (via react-agent) | — |
+| **test** | Test suite identification & execution (opt-in `--run-tests`) | ✓ | pytest, npm, go, cargo, rake | disabled by default; when no framework detectable |
+| **codey** | Executive synthesis + verdict | ✓ | — | — |
 
 ### Structured findings
 
