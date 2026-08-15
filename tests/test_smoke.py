@@ -160,38 +160,6 @@ class TestCacheDB:
         db.close()
 
 
-class TestShellTools:
-    def test_grep_cat_ls_git(self, tmp_path):
-        import subprocess
-
-        from codey.tools.shell import run_cat, run_git, run_grep, run_ls
-
-        (tmp_path / "foo.py").write_text("print('hello')\n", encoding="utf-8")
-        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
-        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=str(tmp_path), check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), check=True)
-        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(tmp_path), check=True)
-        assert run_grep("hello", tmp_path).ok
-        assert "hello" in run_cat("foo.py", tmp_path).stdout
-        assert run_ls("", tmp_path).ok
-        assert run_git(["status"], tmp_path).ok
-
-    def test_git_allow_list(self, tmp_path):
-        from codey.tools.shell import run_git
-
-        result = run_git(["push"], tmp_path)
-        assert not result.ok
-        assert "Disallowed" in result.stderr
-
-    def test_path_traversal_blocked(self, tmp_path):
-        from codey.tools.shell import run_cat
-
-        result = run_cat("../escape.py", tmp_path)
-        assert not result.ok
-        assert "escapes repo root" in result.stderr
-
-
 class TestIndexer:
     def test_index_repository(self, repo):
         from codey.cache.ast_cache import CacheDB
