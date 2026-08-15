@@ -11,13 +11,27 @@ from rich.console import Console
 
 __all__ = ["ProgressEmitter", "make_callback"]
 
-_AGENT_LABELS: dict[str, str] = {
+# Fallback labels (used before the graph registry is populated).
+_FALLBACK_LABELS: dict[str, str] = {
     "index": "Indexing repository",
     "security": "Running security analysis",
     "code_quality": "Checking code quality",
     "test": "Running test suite",
     "codey": "Synthesising final review",
 }
+
+
+def _agent_labels() -> dict[str, str]:
+    """Labels from the agent registry when populated, else fallback."""
+    try:
+        from codey.graph.registry import get_specs
+
+        specs = get_specs()
+        if specs:
+            return {spec.name: spec.label for spec in specs}
+    except Exception:
+        pass
+    return _FALLBACK_LABELS
 
 
 class ProgressEmitter:
@@ -33,11 +47,11 @@ class ProgressEmitter:
             self.console.print(f"[{style}]›[/] {message}")
 
     def emit_agent_start(self, agent: str) -> None:
-        label = _AGENT_LABELS.get(agent, agent)
+        label = _agent_labels().get(agent, agent)
         self.emit(label + "...", style="cyan")
 
     def emit_agent_done(self, agent: str, *, findings: int, status: str = "completed") -> None:
-        label = _AGENT_LABELS.get(agent, agent)
+        label = _agent_labels().get(agent, agent)
         self.emit(f"{label}: {status} ({findings} finding(s))", style="green" if status == "completed" else "yellow")
 
     def emit_error(self, agent: str, error: str) -> None:
@@ -51,10 +65,11 @@ def make_callback(emitter: ProgressEmitter):
     """Create a stream callback suitable for graph.stream()."""
 
     def callback(chunk: dict[str, Any]) -> None:
+        labels = _agent_labels()
         for node_name, node_state in chunk.items():
-            if node_name == "supervisor" or node_name == "codey":
+            if node_name == "codey":
                 emitter.emit_agent_start("codey")
-            elif node_name in _AGENT_LABELS:
+            elif node_name in labels:
                 emitter.emit_agent_start(node_name)
                 reports = node_state.get("agent_reports", {})
                 report = reports.get(node_name)

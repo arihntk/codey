@@ -117,27 +117,78 @@ def _codey_node(state: ReviewState) -> dict[str, Any]:
     }
 
 
+def _register_agents() -> None:
+    """Register the review agents in the declarative registry.
+
+    Called once (idempotently) by ``build_graph``. Adding an agent to the
+    review pipeline means adding an ``AgentSpec`` entry here — no graph
+    wiring changes needed.
+    """
+    from codey.graph.registry import AgentSpec, register
+
+    register(AgentSpec(
+        name="index",
+        label="Indexing repository",
+        run=_index_node,
+    ))
+    register(AgentSpec(
+        name="security",
+        label="Running security analysis",
+        run=_security_node,
+        depends_on=("index",),
+    ))
+    register(AgentSpec(
+        name="code_quality",
+        label="Checking code quality",
+        run=_code_quality_node,
+        depends_on=("index",),
+    ))
+    register(AgentSpec(
+        name="test",
+        label="Running test suite",
+        run=_test_node,
+        depends_on=("index",),
+    ))
+    register(AgentSpec(
+        name="codey",
+        label="Synthesising final review",
+        run=_codey_node,
+        depends_on=("security", "code_quality", "test"),
+    ))
+
+
 def build_graph() -> Any:
-    """Build and compile the LangGraph review graph."""
+    """Build and compile the LangGraph review graph from the agent registry.
+
+    Topology is derived from the registry: the first agent with no
+    dependencies is the entry point (index), agents fan out after their
+    dependencies, and agents with no dependents connect to END (codey).
+    """
+    from codey.graph.registry import first_agent, get_specs, terminal_agents
+
+    _register_agents()
+    specs = get_specs()
+    if not specs:
+        raise RuntimeError("No agents registered — the review graph would be empty")
+
     graph = StateGraph(ReviewState)
 
-    graph.add_node("index", _index_node)
-    graph.add_node("security", _security_node)
-    graph.add_node("code_quality", _code_quality_node)
-    graph.add_node("test", _test_node)
-    graph.add_node("codey", _codey_node)
+    for spec in specs:
+        graph.add_node(spec.name, spec.run)
 
-    # Index runs first, then fan out to the three worker agents in parallel.
-    graph.add_edge(START, "index")
-    graph.add_edge("index", "security")
-    graph.add_edge("index", "code_quality")
-    graph.add_edge("index", "test")
+    # Edges: dependency fan-out.
+    for spec in specs:
+        for dep in spec.depends_on:
+            graph.add_edge(dep, spec.name)
 
-    # All workers converge into the orchestrator.
-    graph.add_edge("security", "codey")
-    graph.add_edge("code_quality", "codey")
-    graph.add_edge("test", "codey")
-    graph.add_edge("codey", END)
+    # Entry point: the first agent with no dependencies.
+    entry = first_agent(specs)
+    if entry is not None:
+        graph.add_edge(START, entry.name)
+
+    # Terminal nodes: agents nothing depends on.
+    for name in terminal_agents(specs):
+        graph.add_edge(name, END)
 
     return graph.compile()
 
