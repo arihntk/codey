@@ -117,8 +117,9 @@ def run_security_agent(
     py_files = [p for p in ctx.changed_files if Path(p).suffix == _BANDIT_LANG]
     all_relevant = [p for p in ctx.changed_files if not _should_skip(p)]
 
-    # 1. Deterministic hardcoded-secret detection (always runs).
-    hardcoded = detect_hardcoded_secrets(ctx.full_diff, file_sources=ctx.file_sources)
+    # 1. Deterministic hardcoded-secret detection (always runs). Scans the
+    #    RAW diff (pre-summarisation) so LLM summaries can't hide secrets.
+    hardcoded = detect_hardcoded_secrets(ctx.raw_full_diff or ctx.full_diff, file_sources=ctx.file_sources)
     hardcoded_titles = {f.title for f in hardcoded}
 
     # 2. External scanners.

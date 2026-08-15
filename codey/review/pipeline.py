@@ -98,6 +98,11 @@ def run_pipeline(
         git_hash=git_hash,
     )
 
+    # Snapshot the raw diff BEFORE large-diff summarisation mutates `diffs`.
+    # Deterministic scanners (hardcoded-secret detector) must run against the
+    # actual code, not an LLM-generated summary.
+    raw_full_diff = "\n".join(diffs.values()) if diffs else ""
+
     # 4. Summarise large diffs via the cheap/fast model.
     #    `_summarise_if_needed` replaces the raw diff text with a compact
     #    summary, and `full_diff` is assembled *after* this step (below), so
@@ -125,6 +130,7 @@ def run_pipeline(
         changed_files=changed_files,
         diff_chunks=chunk_list,
         full_diff=full_diff,
+        raw_full_diff=raw_full_diff,
         db=db,
         run_tests=run_tests,
     )

@@ -35,6 +35,7 @@ class ReviewContext:
     dependent_files: list[str] = field(default_factory=list)
     diff_chunks: list[DiffChunk] = field(default_factory=list)
     full_diff: str = ""
+    raw_full_diff: str = ""  # un-summarized diff, for deterministic scanners
     db: CacheDB | None = None
     file_sources: dict[str, str] = field(default_factory=dict)  # path -> full source
     index_summary: str = ""  # architecture/design summary from indexer
