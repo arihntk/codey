@@ -176,6 +176,12 @@ def index_repository(
 
         if not force and last_hashes.get(rel) == chash and db.get_file_entry(str(repo), last_hash, rel):
             result.reused_files += 1
+            # Reuse the file entry AND symbols under the new hash, otherwise
+            # file_entry_hashes(new_hash) never contains this file and it gets
+            # re-parsed on every subsequent commit (cache thrash).
+            old_entry = db.get_file_entry(str(repo), last_hash, rel)
+            assert old_entry is not None
+            db.upsert_file_entry(str(repo), head_hash, old_entry)
             file_syms = db.symbols_in_file(str(repo), last_hash, rel)
             if file_syms:
                 db.bulk_upsert_symbols(str(repo), head_hash, file_syms)
