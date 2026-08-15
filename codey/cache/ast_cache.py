@@ -80,16 +80,48 @@ class ImportEdge:
 
 
 class CacheDB:
-    """Thin sqlite wrapper for the AST/symbol cache."""
+    """Thin sqlite wrapper for the AST/symbol cache.
+
+    Thread-safe: the review graph runs parallel agent nodes on a thread pool,
+    and while they share this one connection, sqlite forbids cross-thread use
+    by default. The connection is opened with ``check_same_thread=False`` and
+    every statement is serialized through a lock.
+    """
 
     def __init__(self, db_path: Path | str | None = None) -> None:
+        import threading
+
         path = Path(db_path) if db_path else DEFAULT_DB_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = path
-        self._conn = sqlite3.connect(str(path))
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._migrate()
+        self._execute("PRAGMA foreign_keys=ON")
+        with self._lock:
+            self._migrate()
+
+    def _execute(self, query: str, params: tuple | list = ()) -> sqlite3.Cursor:
+        """Serialized execute — safe from any thread."""
+        with self._lock:
+            return self._conn.execute(query, params)
+
+    def _query(self, query: str, params: tuple | list = ()) -> list[sqlite3.Row]:
+        """Execute and fully fetch under the lock (returns rows)."""
+        with self._lock:
+            return list(self._conn.execute(query, params))
+
+    def _query_one(self, query: str, params: tuple | list = ()) -> sqlite3.Row | None:
+        with self._lock:
+            return self._conn.execute(query, params).fetchone()
+
+    def _executemany(self, query: str, params: Sequence) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.executemany(query, params)
+
+    def _commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
 
     # --- lifecycle ----
 
@@ -111,40 +143,40 @@ class CacheDB:
     def _migrate(self) -> None:
         schema = resources.files("codey.cache").joinpath("schema.sql").read_text("utf-8")
         self._conn.executescript(schema)
-        self._conn.commit()
+        self._commit()
 
     # --- index runs ----
 
     def upsert_index_run(self, repo_path: str, git_hash: str, file_count: int = 0) -> None:
-        self._conn.execute(
+        self._execute(
             """INSERT INTO index_runs (repo_path, git_hash, file_count)
                VALUES (?, ?, ?)
                ON CONFLICT (repo_path, git_hash) DO UPDATE SET file_count=excluded.file_count""",
             (repo_path, git_hash, file_count),
         )
-        self._conn.commit()
+        self._commit()
 
     def last_indexed_hash(self, repo_path: str) -> str | None:
-        row = self._conn.execute(
+        row = self._query_one(
             """SELECT git_hash FROM index_runs
                WHERE repo_path=? ORDER BY indexed_at DESC LIMIT 1""",
             (repo_path,),
-        ).fetchone()
+        )
         return row[0] if row else None
 
     def has_indexed_hash(self, repo_path: str, git_hash: str) -> bool:
-        row = self._conn.execute(
+        row = self._query_one(
             "SELECT 1 FROM index_runs WHERE repo_path=? AND git_hash=? LIMIT 1",
             (repo_path, git_hash),
-        ).fetchone()
+        )
         return row is not None
 
     def has_call_edges(self, repo_path: str, git_hash: str) -> bool:
         """True when call/import edges already exist for this (repo, hash)."""
-        row = self._conn.execute(
+        row = self._query_one(
             "SELECT 1 FROM call_edges WHERE repo_path=? AND git_hash=? LIMIT 1",
             (repo_path, git_hash),
-        ).fetchone()
+        )
         return row is not None
 
     # --- file entries ----
@@ -155,7 +187,7 @@ class CacheDB:
         git_hash: str,
         entry: FileEntry,
     ) -> None:
-        self._conn.execute(
+        self._execute(
             """INSERT INTO file_entries
                  (repo_path, git_hash, rel_path, language, content_hash,
                   ast_json, symbols_json, mtime, byte_count)
@@ -179,7 +211,7 @@ class CacheDB:
                 entry.byte_count,
             ),
         )
-        self._conn.commit()
+        self._commit()
 
     def get_file_entry(
         self,
@@ -187,13 +219,13 @@ class CacheDB:
         git_hash: str,
         rel_path: str,
     ) -> FileEntry | None:
-        row = self._conn.execute(
+        row = self._query_one(
             """SELECT rel_path, language, content_hash, ast_json, symbols_json,
                       mtime, byte_count
                FROM file_entries
                WHERE repo_path=? AND git_hash=? AND rel_path=?""",
             (repo_path, git_hash, rel_path),
-        ).fetchone()
+        )
         if not row:
             return None
         return FileEntry(
@@ -211,7 +243,7 @@ class CacheDB:
         repo_path: str,
         git_hash: str,
     ) -> Iterable[FileEntry]:
-        for row in self._conn.execute(
+        for row in self._query(
             """SELECT rel_path, language, content_hash, ast_json, symbols_json,
                       mtime, byte_count
                FROM file_entries
@@ -231,7 +263,7 @@ class CacheDB:
     def list_file_rel_paths(self, repo_path: str, git_hash: str) -> list[str]:
         return [
             r[0]
-            for r in self._conn.execute(
+            for r in self._query(
                 "SELECT rel_path FROM file_entries WHERE repo_path=? AND git_hash=?",
                 (repo_path, git_hash),
             )
@@ -240,7 +272,7 @@ class CacheDB:
     def file_entry_hashes(self, repo_path: str, git_hash: str) -> dict[str, str]:
         return {
             row["rel_path"]: row["content_hash"]
-            for row in self._conn.execute(
+            for row in self._query(
                 "SELECT rel_path, content_hash FROM file_entries WHERE repo_path=? AND git_hash=?",
                 (repo_path, git_hash),
             )
@@ -258,7 +290,7 @@ class CacheDB:
             (repo_path, git_hash, s.rel_path, s.name, s.qualified_name, s.kind, s.line_start, s.line_end)
             for s in symbols
         ]
-        self._conn.executemany(
+        self._executemany(
             """INSERT INTO symbols
                  (repo_path, git_hash, rel_path, name, qualified_name, kind,
                   line_start, line_end)
@@ -268,7 +300,7 @@ class CacheDB:
                              line_end=excluded.line_end""",
             rows,
         )
-        self._conn.commit()
+        self._commit()
 
     def symbols_in_file(self, repo_path: str, git_hash: str, rel_path: str) -> list[SymbolRecord]:
         return [
@@ -280,7 +312,7 @@ class CacheDB:
                 line_start=row["line_start"],
                 line_end=row["line_end"],
             )
-            for row in self._conn.execute(
+            for row in self._query(
                 """SELECT rel_path, name, qualified_name, kind, line_start,
                           line_end
                    FROM symbols
@@ -299,7 +331,7 @@ class CacheDB:
                 line_start=row["line_start"],
                 line_end=row["line_end"],
             )
-            for row in self._conn.execute(
+            for row in self._query(
                 """SELECT rel_path, name, qualified_name, kind, line_start,
                           line_end
                    FROM symbols
@@ -316,7 +348,7 @@ class CacheDB:
         git_hash: str,
         edges: Sequence[CallEdge],
     ) -> None:
-        self._conn.executemany(
+        self._executemany(
             """INSERT INTO call_edges
                  (repo_path, git_hash, caller_path, caller_qname, callee_name,
                   callee_path, callee_qname, line)
@@ -327,7 +359,7 @@ class CacheDB:
                 for e in edges
             ],
         )
-        self._conn.commit()
+        self._commit()
 
     def callers_of(self, repo_path: str, git_hash: str, callee_name: str) -> list[CallEdge]:
         return [
@@ -339,7 +371,7 @@ class CacheDB:
                 callee_qname=row["callee_qname"],
                 line=row["line"],
             )
-            for row in self._conn.execute(
+            for row in self._query(
                 """SELECT caller_path, caller_qname, callee_name, callee_path,
                           callee_qname, line
                    FROM call_edges
@@ -356,7 +388,7 @@ class CacheDB:
         git_hash: str,
         edges: Sequence[ImportEdge],
     ) -> None:
-        self._conn.executemany(
+        self._executemany(
             """INSERT INTO import_edges
                  (repo_path, git_hash, rel_path, module, imported_name, alias,
                   line)
@@ -367,7 +399,7 @@ class CacheDB:
                 for e in edges
             ],
         )
-        self._conn.commit()
+        self._commit()
 
     def importers_of_module(self, repo_path: str, git_hash: str, module: str) -> list[ImportEdge]:
         return [
@@ -378,7 +410,7 @@ class CacheDB:
                 alias=row["alias"],
                 line=row["line"],
             )
-            for row in self._conn.execute(
+            for row in self._query(
                 """SELECT rel_path, module, imported_name, alias, line
                    FROM import_edges
                    WHERE repo_path=? AND git_hash=? AND module=?""",
@@ -396,7 +428,7 @@ class CacheDB:
         if not modules:
             return []
         placeholders = ",".join("?" * len(modules))
-        rows = self._conn.execute(
+        rows = self._query(
             f"""SELECT rel_path, module, imported_name, alias, line
                 FROM import_edges
                 WHERE repo_path=? AND git_hash=?
@@ -424,7 +456,7 @@ class CacheDB:
                 callee_qname=row["callee_qname"],
                 line=row["line"],
             )
-            for row in self._conn.execute(
+            for row in self._query(
                 """SELECT caller_path, caller_qname, callee_name, callee_path,
                           callee_qname, line
                    FROM call_edges
@@ -435,17 +467,17 @@ class CacheDB:
 
     def clear_run(self, repo_path: str, git_hash: str) -> None:
         """Delete all data for a given (repo, git_hash) run."""
-        self._conn.execute("DELETE FROM file_entries WHERE repo_path=? AND git_hash=?",
+        self._execute("DELETE FROM file_entries WHERE repo_path=? AND git_hash=?",
                            (repo_path, git_hash))
-        self._conn.execute("DELETE FROM symbols WHERE repo_path=? AND git_hash=?",
+        self._execute("DELETE FROM symbols WHERE repo_path=? AND git_hash=?",
                            (repo_path, git_hash))
-        self._conn.execute("DELETE FROM call_edges WHERE repo_path=? AND git_hash=?",
+        self._execute("DELETE FROM call_edges WHERE repo_path=? AND git_hash=?",
                            (repo_path, git_hash))
-        self._conn.execute("DELETE FROM import_edges WHERE repo_path=? AND git_hash=?",
+        self._execute("DELETE FROM import_edges WHERE repo_path=? AND git_hash=?",
                            (repo_path, git_hash))
-        self._conn.execute("DELETE FROM index_runs WHERE repo_path=? AND git_hash=?",
+        self._execute("DELETE FROM index_runs WHERE repo_path=? AND git_hash=?",
                            (repo_path, git_hash))
-        self._conn.commit()
+        self._commit()
 
 
 @lru_cache(maxsize=1)
