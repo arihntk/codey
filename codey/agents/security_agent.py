@@ -168,8 +168,14 @@ def run_security_agent(
         if synth_error is not None:
             report_error = (report_error + "; " if report_error else "") + synth_error
         else:
-            llm_findings = _parse_llm_findings(synthesised)
-            if not _llm_output_is_parseable(synthesised):
+            # Parse defensively: a single malformed field (e.g. "severity":
+            # null) must never wipe out the deterministic hardcoded-secret
+            # findings already computed — bad items are skipped, the rest
+            # parse, and the error is recorded.
+            llm_findings, parse_error = _parse_llm_findings(synthesised)
+            if parse_error:
+                report_error = (report_error + "; " if report_error else "") + parse_error
+            elif not _llm_output_is_parseable(synthesised):
                 report_error = (
                     (report_error + "; " if report_error else "")
                     + "LLM returned unparseable output (expected a JSON array of findings)"
@@ -208,16 +214,15 @@ def run_security_agent(
         ))
 
     # Attach verbatim diff evidence to any LLM findings that lack it, then
-    # ENFORCE the verbatim rule for LLM-derived findings: those that still
-    # have no evidence are discarded (the system prompt promises this).
+    # ENFORCE the verbatim rule per-finding (identity, not title — two
+    # findings sharing a title are judged independently): LLM findings that
+    # still have no evidence are discarded (the system prompt promises this).
     attach_evidence(findings, ctx)
     if llm_kept:
-        llm_kept_with_evidence = [f for f in llm_kept if f.evidence.strip()]
-        llm_titles = {f.title for f in llm_kept}
-        llm_kept_titles = {f.title for f in llm_kept_with_evidence}
+        llm_with_evidence = {id(f) for f in llm_kept if f.evidence.strip()}
         findings = [
             f for f in findings
-            if f.title not in llm_titles or f.title in llm_kept_titles
+            if id(f) not in {id(x) for x in llm_kept} or id(f) in llm_with_evidence
         ]
 
     tools_used = [k for k in raw_results] or ["no external security tools"]
@@ -518,24 +523,36 @@ def _diff_truncated_note(diff: str) -> str:
     return ""
 
 
-def _parse_llm_findings(text: str) -> list[Finding]:
-    """Parse LLM JSON output into Finding objects.
+def _parse_llm_findings(text: str) -> tuple[list[Finding], str | None]:
+    """Parse LLM JSON output into Finding objects, defensively.
 
-    Returns ``[]`` both for a valid empty array and for unparseable output.
-    Callers that need to distinguish the two should check
-    :func:`_llm_output_is_parseable` first.
+    Returns ``(findings, error)`` where ``error`` is set when individual
+    items were malformed (e.g. ``"severity": null`` — a value that would
+    otherwise crash ``Severity(...).lower()``). Malformed items are SKIPPED,
+    valid ones are kept — a single bad field never wipes the whole report.
+    Unparseable top-level JSON yields ``([], None)`` (the caller checks
+    :func:`_llm_output_is_parseable` separately).
     """
     stripped = _strip_code_fences(text)
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError:
-        return []
+        return [], None
+    if not isinstance(data, list):
+        return [], "LLM output was not a JSON array"
     findings: list[Finding] = []
+    malformed = 0
     for item in data:
         try:
+            sev_raw = item.get("severity", "info")
+            if sev_raw is None:
+                raise ValueError("severity is null")
+            sev = Severity(str(sev_raw).lower())
+            conf_raw = item.get("confidence", 0.7)
+            conf = float(conf_raw) if conf_raw is not None else 0.7
             findings.append(Finding(
                 category=FindingCategory.SECURITY,
-                severity=Severity(item.get("severity", "info").lower()),
+                severity=sev,
                 title=item.get("title", ""),
                 description=item.get("description", ""),
                 file_path=item.get("file_path"),
@@ -543,11 +560,12 @@ def _parse_llm_findings(text: str) -> list[Finding]:
                 line_end=item.get("line_end"),
                 evidence=item.get("evidence", ""),
                 recommendation=item.get("recommendation", ""),
-                confidence=float(item.get("confidence", 0.7)),
+                confidence=conf,
             ))
         except (ValueError, TypeError):
-            continue
-    return findings
+            malformed += 1
+    error = f"{malformed} malformed LLM finding(s) skipped" if malformed else None
+    return findings, error
 
 
 def _llm_output_is_parseable(text: str) -> bool:

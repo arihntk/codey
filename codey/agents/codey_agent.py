@@ -17,6 +17,7 @@ from codey.agents.schemas import (
     ReviewSummary,
     Severity,
     aggregate_severity,
+    severity_weight,
 )
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
@@ -77,16 +78,21 @@ def run_codey_agent(
         llm_summary, llm_sev, llm_rec, _used, synth_error = _llm_synthesise(primary_llm, agent_reports, ctx)
         if llm_summary:
             summary_text = llm_summary
-        # Trust the LLM's severity/recommendation when it produced valid
-        # values AND the review is complete — the model sees the full context
-        # a max() over severities cannot. Still degrade on errors.
+        # The LLM verdict can refine the deterministic one but NEVER make it
+        # more optimistic: severity = max(deterministic, llm), recommendation
+        # = the stricter of the two. A hardcoded sk-… key (deterministic
+        # CRITICAL/block, confidence 0.95) must not be overridden by an LLM
+        # that says "low"/"approve".
         if synth_error is None:
             try:
-                overall = Severity(llm_sev.lower())
-            except (ValueError, AttributeError):
+                llm_sev_parsed = Severity(llm_sev.lower())
+                if severity_weight(llm_sev_parsed) > severity_weight(overall):
+                    overall = llm_sev_parsed
+            except (ValueError, AttributeError, TypeError):
                 pass
             if llm_rec in ("approve", "request_changes", "block"):
-                rec = llm_rec
+                if _rec_rank(llm_rec) > _rec_rank(rec):
+                    rec = llm_rec
             if errors:
                 rec = _degrade_recommendation(rec)
     if synth_error is not None:
@@ -185,6 +191,14 @@ def _degrade_recommendation(rec: str) -> str:
     if rec == "approve":
         return "request_changes"
     return rec
+
+
+_REC_RANK = {"approve": 0, "request_changes": 1, "block": 2}
+
+
+def _rec_rank(rec: str) -> int:
+    """Ordering: block > request_changes > approve."""
+    return _REC_RANK.get(rec, 0)
 
 
 def _llm_synthesise(

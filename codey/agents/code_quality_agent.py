@@ -80,8 +80,10 @@ def run_code_quality_agent(
         ])
         raw = extract_text(response)
         token_usage = response_tokens(response, fallback_text=raw)
-        findings = _parse_llm_findings(raw)
-        if not _llm_output_is_parseable(raw):
+        findings, parse_error = _parse_llm_findings(raw)
+        if parse_error:
+            report_error = (report_error + "; " if report_error else "") + parse_error
+        elif not _llm_output_is_parseable(raw):
             report_error = "LLM returned unparseable output (expected a JSON array of findings)"
     except Exception as e:
         report_error = str(e)
@@ -96,7 +98,7 @@ def run_code_quality_agent(
                 f"across {len(ctx.changed_files)} file(s) against architecture conventions. "
                 f"Checked {len(ctx.dependent_files)} dependent file(s)."
             ),
-            evidence=diff_text[:500] if diff_text else "",
+            evidence=(diff_text[:500] if diff_text else "No diff content to attach as evidence."),
             confidence=0.7,
         ))
 
@@ -186,7 +188,14 @@ def _build_diff_context(ctx: ReviewContext, *, max_chars: int = 16_000) -> str:
     return "\n".join(parts) if parts else ctx.full_diff[:max_chars]
 
 
-def _parse_llm_findings(text: str) -> list[Finding]:
+def _parse_llm_findings(text: str) -> tuple[list[Finding], str | None]:
+    """Parse LLM JSON output into Finding objects, defensively.
+
+    Returns ``(findings, error)`` — malformed items (e.g. ``"severity":
+    null``) are skipped rather than crashing the whole parse, and the count
+    is returned as an error note. Unparseable top-level JSON yields
+    ``([], None)``; the caller checks parseability separately.
+    """
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -194,13 +203,22 @@ def _parse_llm_findings(text: str) -> list[Finding]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return []
+        return [], None
+    if not isinstance(data, list):
+        return [], "LLM output was not a JSON array"
     findings: list[Finding] = []
+    malformed = 0
     for item in data:
         try:
+            sev_raw = item.get("severity", "info")
+            if sev_raw is None:
+                raise ValueError("severity is null")
+            sev = Severity(str(sev_raw).lower())
+            conf_raw = item.get("confidence", 0.7)
+            conf = float(conf_raw) if conf_raw is not None else 0.7
             findings.append(Finding(
                 category=FindingCategory.CODE_QUALITY,
-                severity=Severity(item.get("severity", "info").lower()),
+                severity=sev,
                 title=item.get("title", ""),
                 description=item.get("description", ""),
                 file_path=item.get("file_path"),
@@ -208,8 +226,9 @@ def _parse_llm_findings(text: str) -> list[Finding]:
                 line_end=item.get("line_end"),
                 evidence=item.get("evidence", ""),
                 recommendation=item.get("recommendation", ""),
-                confidence=float(item.get("confidence", 0.7)),
+                confidence=conf,
             ))
         except (ValueError, TypeError):
-            continue
-    return findings
+            malformed += 1
+    error = f"{malformed} malformed LLM finding(s) skipped" if malformed else None
+    return findings, error
