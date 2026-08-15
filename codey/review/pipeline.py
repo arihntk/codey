@@ -81,74 +81,93 @@ def run_pipeline(
     if not diffs and not changed_files:
         changed_files = changed_files_override or []
 
-    # 2. Index the repo (so symbol table is fresh for chunking + deps).
-    # This also builds the call graph.
-    from codey.index.callgraph import build_call_graph
-    from codey.index.indexer import index_repository
+    # 2. If we're reviewing a non-HEAD commit, materialize its tree in a
+    #    temporary worktree so indexing / chunking / tooling operate on the
+    #    reviewed commit's files — not the current working tree. The diff was
+    #    already computed from the real repo above (diff is commit-relative,
+    #    so it's correct either way). Symbol mapping, dependent files, file
+    #    sources, and the security tools all use `scan_repo`.
+    from codey.review.git import materialize_commit, remove_worktree, resolve_commit
 
-    index_result = index_repository(repo, db)
-    build_call_graph(repo, index_result.git_hash, db)
-    git_hash = index_result.git_hash
+    worktree: Path | None = None
+    try:
+        head_hash = resolve_commit(repo, "HEAD")
+        if git_hash and head_hash and git_hash != head_hash:
+            worktree = materialize_commit(repo, git_hash)
+            scan_repo = worktree
+        else:
+            scan_repo = repo
 
-    # 3. Chunk diffs (function/class level) using cached symbol table.
-    chunk_list = chunk_diff(
-        diffs,
-        db=db,
-        repo_path=str(repo),
-        git_hash=git_hash,
-    )
+        # 3. Index the scan tree (so symbol table is fresh for chunking + deps).
+        #    This also builds the call graph.
+        from codey.index.callgraph import build_call_graph
+        from codey.index.indexer import index_repository
 
-    # Snapshot the raw diff BEFORE large-diff summarisation mutates `diffs`.
-    # Deterministic scanners (hardcoded-secret detector) must run against the
-    # actual code, not an LLM-generated summary.
-    raw_full_diff = "\n".join(diffs.values()) if diffs else ""
+        index_result = index_repository(scan_repo, db)
+        build_call_graph(scan_repo, index_result.git_hash, db)
 
-    # 4. Summarise large diffs via the cheap/fast model.
-    #    `_summarise_if_needed` replaces the raw diff text with a compact
-    #    summary, and `full_diff` is assembled *after* this step (below), so
-    #    agents see the summaries instead of raw hunks for very large changes.
-    large_diffs: list[str] = []
-    if summarizer_llm is not None:
-        for path, text in diffs.items():
-            if len(text) > _LARGE_DIFF_THRESHOLD:
-                large_diffs.append(path)
-        _summarise_if_needed(
-            safeguard=primary_llm is not None,
-            summarizer=summarizer_llm,
-            diffs=diffs,
-            paths=large_diffs,
+        # 4. Chunk diffs (function/class level) using cached symbol table.
+        chunk_list = chunk_diff(
+            diffs,
+            db=db,
+            repo_path=str(scan_repo),
+            git_hash=index_result.git_hash,
         )
 
-    # 5. Assemble full diff text for context.
-    full_diff = "\n".join(diffs.values()) if diffs else ""
+        # Snapshot the raw diff BEFORE large-diff summarisation mutates `diffs`.
+        # Deterministic scanners (hardcoded-secret detector) must run against the
+        # actual code, not an LLM-generated summary.
+        raw_full_diff = "\n".join(diffs.values()) if diffs else ""
 
-    # 6. Build the review context.
-    ctx = ReviewContext(
-        repo_path=repo,
-        git_hash=git_hash,
-        commit_message=commit_message,
-        changed_files=changed_files,
-        diff_chunks=chunk_list,
-        full_diff=full_diff,
-        raw_full_diff=raw_full_diff,
-        db=db,
-        run_tests=run_tests,
-    )
+        # 5. Summarise large diffs via the cheap/fast model.
+        #    `_summarise_if_needed` replaces the raw diff text with a compact
+        #    summary, and `full_diff` is assembled *after* this step (below), so
+        #    agents see the summaries instead of raw hunks for very large changes.
+        large_diffs: list[str] = []
+        if summarizer_llm is not None:
+            for path, text in diffs.items():
+                if len(text) > _LARGE_DIFF_THRESHOLD:
+                    large_diffs.append(path)
+            _summarise_if_needed(
+                safeguard=primary_llm is not None,
+                summarizer=summarizer_llm,
+                diffs=diffs,
+                paths=large_diffs,
+            )
 
-    # 7. Fetch dependent (affected-but-unmodified) files + source snippets.
-    enrich_context(ctx, db)
+        # 6. Assemble full diff text for context.
+        full_diff = "\n".join(diffs.values()) if diffs else ""
 
-    # 8. Enforce context window budget on chunks.
-    _prune_to_budget(ctx)
+        # 7. Build the review context (against the scan tree).
+        ctx = ReviewContext(
+            repo_path=scan_repo,
+            git_hash=git_hash,
+            commit_message=commit_message,
+            changed_files=changed_files,
+            diff_chunks=chunk_list,
+            full_diff=full_diff,
+            raw_full_diff=raw_full_diff,
+            db=db,
+            run_tests=run_tests,
+        )
 
-    # 9. Run the LangGraph review graph.
-    review = run_review(
-        ctx,
-        primary_llm=primary_llm,
-        progress_callback=progress_callback,
-    )
+        # 8. Fetch dependent (affected-but-unmodified) files + source snippets.
+        enrich_context(ctx, db)
 
-    return PipelineResult(review=review, ctx=ctx, large_diffs=large_diffs)
+        # 9. Enforce context window budget on chunks.
+        _prune_to_budget(ctx)
+
+        # 10. Run the LangGraph review graph.
+        review = run_review(
+            ctx,
+            primary_llm=primary_llm,
+            progress_callback=progress_callback,
+        )
+
+        return PipelineResult(review=review, ctx=ctx, large_diffs=large_diffs)
+    finally:
+        if worktree is not None:
+            remove_worktree(repo, worktree)
 
 
 def _summarise_if_needed(*, safeguard: bool, summarizer, diffs: dict[str, str], paths: list[str]) -> None:

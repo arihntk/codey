@@ -15,6 +15,7 @@ __all__ = [
     "get_commit_full_message",
     "amend_commit_message",
     "has_staged_changes",
+    "materialize_commit",
 ]
 
 
@@ -127,6 +128,43 @@ def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
 def get_commit_full_message(repo: Path, *, commit: str = "HEAD") -> str:
     """Return the full commit message (subject + body) for the given commit."""
     return _git(["log", "-1", "--pretty=%B", commit], repo)
+
+
+def materialize_commit(repo: Path, commit_hash: str) -> Path:
+    """Create a temporary detached worktree of *commit_hash* and return its path.
+
+    Used to review non-HEAD commits against their own tree (indexing,
+    chunking, and tooling must see the commit's files, not the working tree).
+    The caller is responsible for removing the worktree afterwards via
+    :func:`remove_worktree`.
+
+    Raises:
+        RuntimeError: if the worktree could not be created.
+    """
+    import tempfile
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="codey-review-"))
+    proc = _git_proc(
+        ["worktree", "add", "--detach", str(tmpdir), commit_hash],
+        repo,
+    )
+    if proc.returncode != 0:
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise RuntimeError(
+            f"Could not create worktree for {commit_hash[:12]}: "
+            f"{proc.stderr.strip() or 'git worktree add failed'}"
+        )
+    return tmpdir
+
+
+def remove_worktree(repo: Path, worktree: Path) -> None:
+    """Remove a temporary worktree created by :func:`materialize_commit`."""
+    import shutil
+
+    _git_proc(["worktree", "remove", "--force", str(worktree)], repo)
+    shutil.rmtree(worktree, ignore_errors=True)
 
 
 def has_staged_changes(repo: Path) -> bool:
