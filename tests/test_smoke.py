@@ -249,3 +249,167 @@ class TestEstimateTokens:
         assert estimate_tokens("") == 1
         assert estimate_tokens("hello world") == 2
         assert estimate_tokens("x" * 100) == 25
+
+
+class TestHardcodedSecrets:
+    """Tests for codey.agents.secrets — the deterministic detector that
+    backs the security agent's credentials coverage and the LLM fallback.
+
+    These cover both the user-facing examples (OpenAI sk-, password=, GitHub
+    ghp_, Bearer auth_token) and the placeholder/false-positive guards."""
+
+    def _diff(self, additions: list[str]) -> str:
+        lines = ["diff --git a/app.py b/app.py", "+++ b/app.py", "@@ -1,1 +" + str(len(additions)) + " @@"]
+        for a in additions:
+            lines.append("+" + a)
+        return "\n".join(lines)
+
+    def test_openai_key_prefix_critical(self):
+        from codey.agents.schemas import Severity
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        fs = detect_hardcoded_secrets(self._diff(['API_KEY = "sk-abcd1234efgh5678ijkl9012mnop3456"']))
+        titles = {f.title for f in fs}
+        sevs = {f.severity for f in fs}
+        assert any("OpenAI API key" in t for t in titles)
+        assert Severity.CRITICAL in sevs
+
+    def test_password_placeholder_filtered(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        # Low-entropy / placeholder values must NOT be flagged.
+        fs = detect_hardcoded_secrets(self._diff(['PASSWORD = "changeme"', 'pw = "password123"', 'pwd = ""']))
+        assert fs == []
+
+    def test_github_pat_critical(self):
+        from codey.agents.schemas import Severity
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        fs = detect_hardcoded_secrets(self._diff(['real_key = "ghp_01234567890abcdefghijklmnopqrstuvwxyzABCD"']))
+        matches = [f for f in fs if "GitHub" in f.title]
+        assert matches, fs
+        assert matches[0].severity == Severity.CRITICAL
+
+    def test_bearer_auth_token_high(self):
+        from codey.agents.schemas import Severity
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        # A Bearer JWT-ish literal value that passes entropy.
+        token_value = (
+            "Bearer x9y8z7a6b5c4d3e2f1g0h9i8j7k6l5m4n3o2p1q0r9s8t7u6v5w4x3y2z1"
+        )
+        fs = detect_hardcoded_secrets(self._diff([f'auth_token = "{token_value}"']))
+        matches = [f for f in fs if "auth token" in f.title]
+        assert matches, fs
+        assert matches[0].severity == Severity.HIGH
+
+    def test_real_high_entropy_password_flagged(self):
+        from codey.agents.schemas import Severity
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        fs = detect_hardcoded_secrets(self._diff(['PASSWORD = "Tr0ub4dour&3-shay-ith-not"']))
+        matches = [f for f in fs if "password" in f.title.lower()]
+        assert matches, fs
+        assert matches[0].severity == Severity.HIGH
+
+    def test_no_findings_on_clean_diff(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        fs = detect_hardcoded_secrets(self._diff(['x = 1', 'y = os.environ["API_KEY"]']))
+        assert fs == []
+
+    def test_removed_secret_is_not_flagged(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        diff = (
+            "diff --git a/app.py b/app.py\n+++ b/app.py\n@@ -1,1 +1,1 @@\n"
+            '-API_KEY = "sk-abcd1234efgh5678ijkl9012mnop3456"\n'
+            '+API_KEY = os.environ["API_KEY"]\n'
+        )
+        fs = detect_hardcoded_secrets(diff)
+        assert fs == []
+
+    def test_dedup_same_value_multiple_rules(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        # sk-... matches both the OpenAI rule and the api_key keyword rule.
+        fs = detect_hardcoded_secrets(self._diff(['API_KEY = "sk-abcd1234efgh5678ijkl9012mnop3456"']))
+        # Only ONE finding should survive (the critical OpenAI one wins).
+        assert not any("Hardcoded API key" in f.title for f in fs), fs
+        assert any("OpenAI API key" in f.title for f in fs), fs
+
+    def test_evidence_is_verbatim(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        line = 'API_KEY = "sk-abcd1234efgh5678ijkl9012mnop3456"'
+        fs = detect_hardcoded_secrets(self._diff([line]))
+        assert fs
+        assert fs[0].evidence.strip() == line
+
+    def test_file_sources_pem(self):
+        from codey.agents.schemas import Severity
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        pem = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEpAIJBAAKCAQEA0123456789...\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        fs = detect_hardcoded_secrets("", file_sources={"server.py": pem})
+        assert fs
+        assert fs[0].severity == Severity.CRITICAL
+        assert fs[0].file_path == "server.py"
+
+    def test_empty_diff(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        assert detect_hardcoded_secrets("") == []
+
+    def test_shannon_entropy(self):
+        from codey.agents.secrets import shannon_entropy
+
+        assert shannon_entropy("") == 0.0
+        # Uniform single-symbol → entropy is 0.
+        assert shannon_entropy("aaaa") == 0.0
+        # Real secrets should be high.
+        assert shannon_entropy("sk-abcd1234efgh5678ijkl9012mnop3456") > 4.0
+        # Placeholders should be low.
+        assert shannon_entropy("password123") < 3.5
+
+
+class TestSecurityAgentMerge:
+    """End-to-end check that run_security_agent keeps hardcoded secrets
+    when the LLM is unavailable (the fallback path), and that the LLM
+    does NOT silently drop them in favour of its own findings."""
+
+    def test_hardcoded_secrets_survive_without_llm(self, repo):
+        import subprocess
+
+        from codey.agents.context import ReviewContext
+        from codey.agents.security_agent import run_security_agent
+
+        # Add a commit that introduces an OpenAI key.
+        (repo / "leak.py").write_text(
+            'API_KEY = "sk-abcd1234efgh5678ijkl9012mnop3456"\n',
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "leak"], cwd=str(repo), check=True)
+
+        from codey.review.git import get_changed_files, get_commit_diff
+        changed = get_changed_files(repo)
+        diffs = get_commit_diff(repo)  # dict[file -> diff_text]
+        full_diff = "\n".join(diffs.values()) if diffs else ""
+        ctx = ReviewContext(
+            repo_path=repo,
+            git_hash="HEAD",
+            commit_message="leak",
+            changed_files=changed,
+            full_diff=full_diff,
+        )
+
+        report = run_security_agent(ctx, llm=None)
+        titles = " | ".join(f.title for f in report.findings)
+        assert "OpenAI API key" in titles, titles
+        assert any(f.severity.value == "critical" for f in report.findings)
+        assert "hardcoded-secret detector" in report.summary

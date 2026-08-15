@@ -1,9 +1,23 @@
 """SecurityAgent — multi-tool security analysis with LLM synthesis.
 
-Runs bandit (Python), semgrep (multi-language), and gitleaks (secrets) against
-the changed files. Skips file types that obviously don't affect security (css,
-md, images, fonts, etc.). Feeds raw results to the LLM which synthesises
-structured findings with evidence and recommendations.
+Runs (in order):
+1. A deterministic hardcoded-secret detector (no third-party dependency;
+   prefix rules + Shannon-entropy placeholder filtering). This is the
+   primary source of truth for *credential* leaks and the authoritative
+   fallback when the LLM is unavailable.
+2. Bandit (Python), semgrep (multi-language), gitleaks (secrets) — if
+   installed.
+3. An LLM pass that synthesises the tool outputs *and* specifically judges
+   *non-secret confidentiality leaks* that have no easy regex anchor —
+   sensitive PII, internal URLs/hostnames, account/record IDs, business-
+   confidential strings, debug/telemetry payloads, etc.
+
+Hardcoded-secret findings survive the LLM step: the LLM is told not to drop
+them and to add its own judgement on top.  If the LLM is absent, the
+hardcoded-secret findings are returned as-is.
+
+Skips file types that obviously don't affect security (css, md, images,
+fonts, etc.) for the external-tool stage; the diff is always reviewed.
 """
 
 from __future__ import annotations
@@ -16,6 +30,7 @@ from pathlib import Path
 from codey.agents.context import ReviewContext
 from codey.agents.evidence import attach_evidence
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.agents.secrets import detect_hardcoded_secrets
 from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
 
@@ -40,23 +55,44 @@ def _should_skip(path: str) -> bool:
 
 
 _SECURITY_SYSTEM = (
-    "You are a senior security analyst. Review the following outputs from "
-    "automated security tools (bandit, semgrep, gitleaks) for a code change. "
-    "For each genuine issue, produce a structured finding with:\n"
+    "You are a senior security analyst. You review code changes for both "
+    "Classic application-security vulnerabilities AND confidentiality leaks.\n\n"
+    "Your scope is explicitly MORE than just hardcoded secrets — the "
+    "deterministic detector already handles credentials. You must also "
+    "JUDGE confidentiality leaks that have no easy regex anchor, such as:\n"
+    "  • PII — emails, phone numbers, addresses, national IDs, SSNs,\n"
+    "    account/record IDs, user/client names embedded in source.\n"
+    "  • Internal-only endpoints — internal hostnames, private IP ranges,\n"
+    "    staging/admin URLs, hidden feature flags, internal API paths.\n"
+    "  • Provider/account references — cloud account numbers, project IDs,\n"
+    "    resource ARNs, org/workspace IDs, customer IDs.\n"
+    "  • Crypto / auth mistakes — weak hashes (MD5/SHA1 for passwords),\n"
+    "    reused IVs, disabled TLS verification, hardcoded JWT secrets,\n"
+    "    insecure randomness, SQL string concatenation, command injection.\n"
+    "  • Logging/telemetry — secrets or PII written to logs/metrics, verbose\n"
+    "    error messages leaking stack/state, debug endpoints left enabled.\n"
+    "  • Any other disclosure that could harm users or the organisation.\n\n"
+    "For each genuine issue produce a structured finding with:\n"
     "- category: security\n"
-    "- severity: critical/high/medium/low/info\n"
+    "- severity: critical/high/medium/low/info (calibrate honestly — "
+    "real secret EMERGENCY = critical; leaked PII = high/medium depending "
+    "on volume & sensitivity; risky pattern = medium/low)\n"
     "- title: short description\n"
     "- description: what the vulnerability is and why it matters\n"
-    "- file_path and line_start (from the tool output)\n"
-    "- evidence: VERBATIM copy of the relevant code line or tool output snippet "
-    "that proves the issue exists — never fabricate evidence\n"
+    "- file_path and line_start (from the tool output when available)\n"
+    "- evidence: VERBATIM copy of the relevant code line / tool output. "
+    "NEVER fabricate or paraphrase evidence. If you cannot quote the exact "
+    "text, do NOT emit the finding.\n"
     "- recommendation: how to fix it\n"
     "- confidence: 0.0-1.0\n\n"
-    "CRITICAL: Every finding MUST include evidence copied from the tool output "
-    "or diff. Findings without verbatim evidence will be discarded. "
-    "Only report genuine issues grounded in the provided data. Deduplicate. "
-    "If no issues, output an empty array []."
-    "Output as a JSON array of finding objects."
+    "IMPORTANT rules:\n"
+    "  - You will be given a list of findings already produced by the "
+    "deterministic detector. Do NOT duplicate or downgrade them — they are "
+    "high-precision. You MAY keep them as-is in your output and add your own.\n"
+    "  - Only report genuine issues grounded in the provided data. Deduplicate.\n"
+    "  - If there are no issues, output an empty array [].\n"
+    "  - Output ONLY a JSON array of finding objects — no commentary, no "
+    "markdown fences."
 )
 
 
@@ -65,59 +101,86 @@ def run_security_agent(
     db=None,
     llm: object | None = None,
 ) -> AgentReport:
-    """Run security scanners and synthesise results into an AgentReport."""
+    """Run security scanners and synthesise results into an AgentReport.
+
+    Pipeline:
+      1. ``detect_hardcoded_secrets`` (deterministic, no external deps) on
+         the diff + optional full file sources — the authoritative source
+         for credential leaks AND the guaranteed fallback when the LLM is
+         unavailable.
+      2. bandit / semgrep / gitleaks — if installed.
+      3. LLM synthesis that ingests the hardcoded-secret findings AND the
+         tool outputs AND the diff, and is explicitly asked to add its own
+         *confidentiality-judgement* findings beyond secrets.
+    """
     repo = ctx.repo_path
-    # Filter to security-relevant files.
     py_files = [p for p in ctx.changed_files if Path(p).suffix == _BANDIT_LANG]
     all_relevant = [p for p in ctx.changed_files if not _should_skip(p)]
 
+    # 1. Deterministic hardcoded-secret detection (always runs).
+    hardcoded = detect_hardcoded_secrets(ctx.full_diff, file_sources=ctx.file_sources)
+    hardcoded_titles = {f.title for f in hardcoded}
+
+    # 2. External scanners.
     raw_results: dict[str, str] = {}
     bandit_findings = _run_bandit(repo, py_files)
     if bandit_findings:
         raw_results["bandit"] = bandit_findings
-
     semgrep_findings = _run_semgrep(repo, all_relevant)
     if semgrep_findings is not None:
         raw_results["semgrep"] = semgrep_findings
-
     gitleaks_findings = _run_gitleaks(repo)
     if gitleaks_findings is not None:
         raw_results["gitleaks"] = gitleaks_findings
 
-    findings: list[Finding] = []
-
-    # Parse raw tool results into initial findings.
+    tool_findings: list[Finding] = []
     for src in raw_results:
-        tool_findings = _parse_tool_results(src, raw_results[src])
-        findings.extend(tool_findings)
+        tool_findings.extend(_parse_tool_results(src, raw_results[src]))
 
     token_usage = 0
 
-    # LLM synthesis: refine raw findings into structured findings.
-    if llm is not None and findings:
-        synthesised = _llm_synthesise(llm, raw_results, ctx.full_diff, ctx.changed_files)
+    # 3. LLM judgement. The LLM always reviews the diff (when available) —
+    #    even if no tool flagged anything — so non-secret confidentiality
+    #    leaks get judged.  Hardcoded-secret findings are merged *after* and
+    #    survive LLM output (only an LLM finding that exactly matches a
+    #    hardcoded one is dropped, to avoid duplicates).
+    llm_findings: list[Finding] = []
+    if llm is not None:
+        synthesised = _llm_synthesise(
+            llm,
+            raw_results,
+            ctx.full_diff,
+            ctx.changed_files,
+            hardcoded_findings=hardcoded,
+        )
         token_usage = len(synthesised) // 4
-        refined = _parse_llm_findings(synthesised)
-        if refined:
-            findings = refined
-    elif llm is not None and not findings:
-        # No raw findings; quick LLM scan of diff itself.
-        synthesised = _llm_scan_diff(llm, ctx.full_diff, ctx.changed_files)
-        token_usage = len(synthesised) // 4
-        refined = _parse_llm_findings(synthesised)
-        if refined:
-            findings = refined
+        llm_findings = _parse_llm_findings(synthesised)
+
+    # Merge: LLM findings first (broader confidentiality judgement), then
+    # tool findings, then hardcoded-secret findings — dropping any LLM/tool
+    # finding whose title collides with a hardcoded finding.
+    findings: list[Finding] = []
+    for f in llm_findings:
+        if f.title in hardcoded_titles:
+            continue
+        findings.append(f)
+    for f in tool_findings:
+        if f.title in hardcoded_titles:
+            continue
+        findings.append(f)
+    findings.extend(hardcoded)
 
     if not findings:
-        tools_run = [k for k in raw_results] or ["none (no security tools available)"]
-        tool_evidence = "; ".join(f"{k}: 0 issues" for k in raw_results) or "no tools ran"
+        tool_evidence = "; ".join(f"{k}: 0 issues" for k in raw_results) or "no external tools ran"
         findings.append(Finding(
             category=FindingCategory.SECURITY,
             severity=Severity.INFO,
             title="No security issues found",
             description=(
-                f"No security vulnerabilities detected by automated tools or LLM review. "
-                f"Scanned {len(all_relevant)} file(s) with {', '.join(tools_run)}."
+                f"No security vulnerabilities detected by the hardcoded-secret "
+                f"detector, automated tools, or LLM review. "
+                f"Scanned {len(all_relevant)} relevant file(s); hardcode check "
+                f"examined the full diff."
             ),
             evidence=tool_evidence,
             confidence=0.8,
@@ -126,7 +189,7 @@ def run_security_agent(
     # Attach verbatim diff evidence to any LLM findings that lack it.
     attach_evidence(findings, ctx)
 
-    tools_used = [k for k in raw_results] or ["none (no security tools available)"]
+    tools_used = [k for k in raw_results] or ["no external security tools"]
     finding_details = "; ".join(
         f"{f.title} [{f.severity.value}]"
         + (f" at {f.file_path}:{f.line_start}" if f.file_path else "")
@@ -134,18 +197,21 @@ def run_security_agent(
         if f.severity != Severity.INFO
     )
     summary = (
-        f"Security scan using {', '.join(tools_used)}. "
-        f"Scanned {len(all_relevant)} file(s). "
+        f"Security scan using {', '.join(tools_used)} + hardcoded-secret detector"
+        + (", LLM confidentiality review" if llm is not None else "")
+        + f". Scanned {len(all_relevant)} relevant file(s) and the full diff. "
         f"Found {len(findings)} finding(s)."
+        + (f" Issues: {finding_details}." if finding_details else "")
     )
-    if finding_details:
-        summary += f" Issues: {finding_details}."
+    metadata = {k: v[:2000] for k, v in raw_results.items()}
+    if hardcoded:
+        metadata["hardcoded_secrets"] = f"{len(hardcoded)} finding(s) from deterministic detector"
     return AgentReport(
         agent="security",
         status="completed",
         summary=summary,
         findings=findings,
-        metadata={k: v[:2000] for k, v in raw_results.items()},
+        metadata=metadata,
         token_usage=token_usage,
     )
 
@@ -299,45 +365,66 @@ def _parse_tool_results(source: str, raw: str) -> list[Finding]:
 # --- LLM synthesis ----
 
 
-def _llm_synthesise(llm: object, raw_results: dict[str, str], diff: str, changed_files: list[str]) -> str:
+def _hardcoded_summary(hardcoded: list[Finding]) -> str:
+    """Render the deterministic-secret findings as plain text for the LLM.
+
+    The LLM is instructed (via the system prompt) not to drop or downgrade
+    these — they are high-precision.  We surface them so the LLM doesn't
+    have to re-derive them from the raw diff, which both saves tokens and
+    keeps the final list consistent.
+    """
+    if not hardcoded:
+        return "(none)"
+    out = []
+    for i, f in enumerate(hardcoded, 1):
+        loc = f"{f.file_path}:{f.line_start}" if f.file_path else "unknown"
+        out.append(
+            f"  {i}. [{f.severity.value.upper()}] {f.title} @ {loc}\n"
+            f"     evidence: {f.evidence}"
+        )
+    return "\n".join(out)
+
+
+def _llm_synthesise(
+    llm: object,
+    raw_results: dict[str, str],
+    diff: str,
+    changed_files: list[str],
+    *,
+    hardcoded_findings: list[Finding] | None = None,
+) -> str:
+    """Ask the LLM to merge tool outputs + hardcoded-secret findings and
+    ADD its own confidentiality-judgement findings for issues that have no
+    easy regex anchor (PII, internal endpoints, crypto/auth mistakes, etc.).
+
+    The LLM always reviews the diff — regardless of whether bandit/semgrep/
+    gitleaks produced output — so confidential-info leaks are judged, not
+    just secrets.
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    raw_text = "\n\n".join(f"=== {k} ===\n{v[:5000]}" for k, v in raw_results.items())
+    raw_text = "\n\n".join(f"=== {k} ===\n{v[:5000]}" for k, v in raw_results.items()) or "(no external tool output)"
     diff_excerpt = diff[:8000] if diff else "(no diff)"
     files_str = ", ".join(changed_files[:30])
+    hardcoded_text = _hardcoded_summary(hardcoded_findings or [])
     try:
         response = invoke_with_retry(llm, [
             SystemMessage(content=_SECURITY_SYSTEM),
             HumanMessage(content=(
                 f"Changed files: {files_str}\n\n"
+                f"Deterministic hardcoded-secret findings (already confirmed — "
+                f"keep them in your output, do not re-derive or downgrade):\n"
+                f"{hardcoded_text}\n\n"
                 f"Raw tool results:\n{raw_text}\n\n"
                 f"Diff:\n```diff\n{diff_excerpt}\n```\n\n"
-                "Output the findings as a JSON array:"
+                "Output the findings as a single JSON array. Include the "
+                "hardcoded-secret findings above verbatim AND add your own "
+                "for any other confidentiality or security issue you find."
             )),
         ])
         return extract_text(response)
     except Exception as e:
         return f"[] // LLM synthesis failed: {e}"
-
-
-def _llm_scan_diff(llm: object, diff: str, changed_files: list[str]) -> str:
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    diff_excerpt = diff[:12000] if diff else "(no diff)"
-    files_str = ", ".join(changed_files[:30])
-    prompt = (
-        "No automated security tool findings were reported. "
-        "Review the diff below for security issues and output findings as a JSON array. "
-        "If truly no issues, output []."
-    )
-    try:
-        response = invoke_with_retry(llm, [
-            SystemMessage(content=_SECURITY_SYSTEM + "\n\n" + prompt),
-            HumanMessage(content=f"Changed files: {files_str}\n\nDiff:\n```diff\n{diff_excerpt}\n```"),
-        ])
-        return extract_text(response)
-    except Exception as e:
-        return f"[] // LLM scan failed: {e}"
 
 
 def _parse_llm_findings(text: str) -> list[Finding]:
