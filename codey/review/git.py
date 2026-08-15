@@ -101,7 +101,13 @@ def get_commit_diff(repo: Path, *, commit: str = "HEAD") -> dict[str, str]:
 
 
 def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
-    """Split a combined git diff into per-file diff hunks."""
+    """Split a combined git diff into per-file diff hunks.
+
+    Keys are the *new* file path (the ``b/`` side). Files that are deleted,
+    renamed without content changes, or changed as binary produce no
+    ``+++ b/`` line — the file name is taken from the ``diff --git`` header
+    instead so those changes are never silently invisible.
+    """
     result: dict[str, str] = {}
     if not raw_diff.strip():
         return result
@@ -109,23 +115,36 @@ def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
     current_file: str = ""
     current_hunk: list[str] = []
 
+    def _flush() -> None:
+        if current_file and current_hunk:
+            result[current_file] = "".join(current_hunk)
+
     for line in lines:
         if line.startswith("diff --git "):
-            if current_file and current_hunk:
-                result[current_file] = "".join(current_hunk)
-            current_file = ""
+            _flush()
+            # diff --git a/<old> b/<new>
+            rest = line[len("diff --git "):]
+            parts = rest.split()
+            new_path = parts[1][2:] if len(parts) > 1 else ""
+            if new_path == "/dev/null":
+                # Deletion: the diff belongs to the removed file.
+                new_path = parts[0][2:] if parts else ""
+            current_file = new_path
             current_hunk = [line]
-        elif line.startswith("+++ b/"):
-            current_file = line[6:].rstrip("\n")
+        elif line.startswith("+++ "):
+            # +++ b/<path> or +++ /dev/null — normalize to b/ side.
+            p = line[4:].strip()
+            if p.startswith("b/"):
+                current_file = p[2:]
+            elif p == "/dev/null":
+                pass  # deletion; current_file already set from header
             current_hunk.append(line)
-        elif line.startswith("--- a/"):
+        elif line.startswith("--- "):
             current_hunk.append(line)
         else:
             current_hunk.append(line)
 
-    if current_file and current_hunk:
-        result[current_file] = "".join(current_hunk)
-
+    _flush()
     return result
 
 
