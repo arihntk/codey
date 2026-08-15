@@ -173,9 +173,17 @@ def build_call_graph(
     *,
     python_files: list[Path] | None = None,
 ) -> CallGraphResult:
-    """Build and store call + import edges for all Python files in the repo."""
+    """Build and store call + import edges for all Python files in the repo.
+
+    No-ops (returns an empty result) when edges already exist for this
+    (repo, git_hash) — jedi reference resolution is the slowest part of the
+    pipeline and is pure re-work on cache hits.
+    """
     repo = Path(repo_path).resolve()
     result = CallGraphResult()
+
+    if db.has_call_edges(str(repo), git_hash):
+        return result
 
     if python_files is None:
         all_files = list_repo_files(repo)

@@ -139,6 +139,14 @@ class CacheDB:
         ).fetchone()
         return row is not None
 
+    def has_call_edges(self, repo_path: str, git_hash: str) -> bool:
+        """True when call/import edges already exist for this (repo, hash)."""
+        row = self._conn.execute(
+            "SELECT 1 FROM call_edges WHERE repo_path=? AND git_hash=? LIMIT 1",
+            (repo_path, git_hash),
+        ).fetchone()
+        return row is not None
+
     # --- file entries ----
 
     def upsert_file_entry(

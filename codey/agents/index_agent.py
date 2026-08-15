@@ -13,7 +13,7 @@ from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.cache.ast_cache import CacheDB
 from codey.index.callgraph import build_call_graph
-from codey.index.indexer import index_repository
+from codey.index.indexer import IndexResult, index_repository
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
@@ -37,13 +37,27 @@ def run_index_agent(
     db: CacheDB,
     llm: object | None = None,
 ) -> tuple[AgentReport, str]:
-    """Index the repo and produce an architecture summary.
+    """Produce an architecture summary from the indexed symbol table.
+
+    Indexing is owned by the pipeline (run_pipeline calls index_repository
+    before the graph starts); this agent only indexes if the current hash
+    isn't cached yet (e.g. direct invocation outside the pipeline) so the
+    work is never duplicated.
 
     Returns (AgentReport, index_summary_string).
     """
     repo = ctx.repo_path
-    index_result = index_repository(repo, db)
-    build_call_graph(repo, index_result.git_hash, db)
+    if not db.has_indexed_hash(str(repo), ctx.git_hash):
+        index_result = index_repository(repo, db)
+        build_call_graph(repo, index_result.git_hash, db)
+    else:
+        # Pipeline already indexed this hash; just report cached counts.
+        cached_paths = db.list_file_rel_paths(str(repo), ctx.git_hash)
+        index_result = IndexResult(
+            git_hash=ctx.git_hash,
+            total_files=len(cached_paths),
+            reused_files=len(cached_paths),
+        )
 
     # Build symbol overview for the LLM.
     overview = _build_symbol_overview(db, str(repo), index_result.git_hash)
