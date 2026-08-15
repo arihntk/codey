@@ -5,8 +5,6 @@ from __future__ import annotations
 from operator import add
 from typing import Annotated, TypedDict
 
-from langgraph.graph import add_messages
-
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, ReviewSummary
 
@@ -29,7 +27,8 @@ def merge_reports(
 class ReviewState(TypedDict, total=False):
     """State threaded through the review graph."""
 
-    # Context (immutable through the graph).
+    # Context shared by all nodes. Treated as read-only; nodes that need to
+    # tweak it (e.g. inject the index summary) copy it first.
     context: ReviewContext
 
     # Agent reports accumulate via reducer.
@@ -40,9 +39,6 @@ class ReviewState(TypedDict, total=False):
 
     # The final synthesized review (filled by the orchestrator at the end).
     final_review: ReviewSummary
-
-    # LangGraph messages for supervisor subagent communication.
-    messages: Annotated[list, add_messages]
 
     # Progress events for the progress emitter (parallel-safe via add reducer).
     progress: Annotated[list[str], add]
@@ -66,6 +62,5 @@ def initial_state(
         index_summary="",
         progress=[],
         errors=[],
-        messages=[],
         primary_llm=primary_llm,
     )

@@ -60,9 +60,13 @@ def _security_node(state: ReviewState) -> dict[str, Any]:
 
 
 def _code_quality_node(state: ReviewState) -> dict[str, Any]:
+    from dataclasses import replace
+
     ctx: ReviewContext = state["context"]
-    # Inject the index summary from the prior index agent.
-    ctx.index_summary = state.get("index_summary", "")
+    # Inject the index summary from the prior index agent WITHOUT mutating the
+    # shared context — the node gets a copy so parallel nodes never observe a
+    # half-written context.
+    ctx = replace(ctx, index_summary=state.get("index_summary", ""))
     primary_llm = state.get("primary_llm")
     try:
         report = run_code_quality_agent(ctx, db=ctx.db, llm=primary_llm)

@@ -37,16 +37,17 @@ from codey.process import scrubbed_env
 
 __all__ = ["run_security_agent"]
 
-# Files that obviously don't affect security.
+# Files that obviously don't affect security. Deliberately does NOT skip
+# config/data files (.json/.yaml/.yml/.toml/.ini/.cfg/.env, HTML) — those are
+# exactly where credentials get committed, so they stay in scope for the
+# external scanners (and the diff-level secret detector always scans them).
 _SKIP_SUFFIXES = {
     ".css", ".scss", ".sass", ".less",
-    ".md", ".rst", ".txt", ".txt",
+    ".md", ".rst",
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".bmp", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
     ".pdf", ".zip", ".tar", ".gz", ".bz2",
-    ".lock", ".toml", ".cfg", ".ini",
-    ".json", ".yaml", ".yml",
-    ".html",
+    ".lock",
 }
 _BANDIT_LANG = ".py"
 
@@ -228,6 +229,10 @@ def run_security_agent(
     metadata = {k: v[:2000] for k, v in raw_results.items()}
     if hardcoded:
         metadata["hardcoded_secrets"] = f"{len(hardcoded)} finding(s) from deterministic detector"
+    trunc_note = _diff_truncated_note(ctx.raw_full_diff or ctx.full_diff)
+    if trunc_note:
+        metadata["diff_truncated"] = trunc_note
+        summary += f" Note: {trunc_note}"
     return AgentReport(
         agent="security",
         status="error" if report_error is not None else "completed",
@@ -476,6 +481,16 @@ def _llm_synthesise(
         return text, response_tokens(response, fallback_text=text), None
     except Exception as e:
         return "", 0, str(e)
+
+
+def _diff_truncated_note(diff: str) -> str:
+    """Human-readable note when the LLM diff excerpt was truncated."""
+    if diff and len(diff) > 8000:
+        return (
+            f"LLM diff excerpt truncated to first 8000 chars of {len(diff)} "
+            "(full raw diff scanned by the deterministic detector)."
+        )
+    return ""
 
 
 def _parse_llm_findings(text: str) -> list[Finding]:

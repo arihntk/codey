@@ -65,7 +65,10 @@ def _detect_frameworks(repo: Path) -> list[tuple[str, list[str]]]:
                 break
 
     # Fallback: if there's a tests/ directory and pytest is available.
-    if not detected and any((repo / "tests").glob("test_*.py")) or any((repo / "test").glob("test_*.py")):
+    if not detected and (
+        any((repo / "tests").glob("test_*.py"))
+        or any((repo / "test").glob("test_*.py"))
+    ):
         if shutil.which("pytest"):
             detected.append(("pytest", ["pytest", "-x", "--tb=short"]))
 
