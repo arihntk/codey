@@ -726,17 +726,18 @@ def review_cmd(
         raise typer.Exit(1)
     short_hash = resolved[:12]
 
-    console.print()
-    console.print(f"[bold]Codey Review[/] — {repo.name}")
-    console.print(
-        f"[dim]Commit: {short_hash}[/]"
-        f"  [dim]Model: {primary_resolved.model_name}"
-        f" | Summarizer: {summarizer_resolved.model_name}[/]"
-    )
-    console.print()
+    if not json_out:
+        console.print()
+        console.print(f"[bold]Codey Review[/] — {repo.name}")
+        console.print(
+            f"[dim]Commit: {short_hash}[/]"
+            f"  [dim]Model: {primary_resolved.model_name}"
+            f" | Summarizer: {summarizer_resolved.model_name}[/]"
+        )
+        console.print()
 
-    emitter = ProgressEmitter(console=console, enabled=not no_progress)
-    cb = make_callback(emitter) if not no_progress else None
+    emitter = ProgressEmitter(console=console, enabled=not no_progress and not json_out)
+    cb = make_callback(emitter) if not no_progress and not json_out else None
 
     db = CacheDB()
     if force_index:
@@ -768,14 +769,17 @@ def review_cmd(
     finally:
         db.close()
 
-    emitter.done("Review complete")
-    console.print()
     if json_out:
-        # Machine-readable output: dump the full ReviewSummary. Skip the
-        # rich rendering so stdout is parseable JSON (usable as a CI gate).
-        review_json = result.review.model_dump_json(indent=2)
-        console.print(review_json)
+        # Machine-readable output: dump the full ReviewSummary to stdout
+        # directly (no rich markup interpretation — console.print with
+        # markup would mangle any [brackets] inside summaries) and skip the
+        # human progress/render so stdout is pure JSON (usable as a CI gate).
+        import sys
+
+        sys.stdout.write(result.review.model_dump_json(indent=2) + "\n")
     else:
+        emitter.done("Review complete")
+        console.print()
         render_review(result.review, console=console)
 
     _maybe_append_summary(result.review, repo=repo, commit=commit, cfg=cfg, console=console)
