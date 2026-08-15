@@ -272,27 +272,22 @@ def reverse_dependencies(
             if imp.rel_path not in normalised:
                 dependents.add(imp.rel_path)
 
-    # 2. Call-based reverse deps: symbols defined in affected files. Match by
-    #    QUALIFIED name when the callee resolved to this repo (edge.callee_qname
-    #    carries the resolution); bare-name matching alone would collide — two
-    #    unrelated classes with a method named 'run' would produce spurious
-    #    dependent edges for each other's files.
+    # 2. Call-based reverse deps: symbols defined in affected files. Only
+    #    QUALIFIED matches count (edge.callee_qname carries the resolution).
+    #    Unresolved callees (external libs, no qname) are intentionally NOT
+    #    matched by bare name — two unrelated classes with a method named
+    #    'run' would otherwise produce spurious dependent edges for each
+    #    other's files.
     affected_by_qname: dict[str, str] = {}   # qualified_name -> rel path
-    affected_bare_names: set[str] = set()
     for ap in affected_set:
         rel = _rel(ap)
         for s in db.symbols_in_file(key, git_hash, rel):
             affected_by_qname[s.qualified_name] = rel
-            affected_bare_names.add(s.name)
 
     for edge in db.all_call_edges(key, git_hash):
         if edge.caller_path in normalised:
             continue
         if edge.callee_qname and edge.callee_qname in affected_by_qname:
-            dependents.add(edge.caller_path)
-        elif not edge.callee_qname and edge.callee_name in affected_bare_names:
-            # Unresolved callee (external/unknown): bare-name match is the only
-            # signal available — keep it, but this is inherently lossy.
             dependents.add(edge.caller_path)
 
     return sorted(dependents)

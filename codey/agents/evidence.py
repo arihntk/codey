@@ -88,7 +88,10 @@ def _extract_from_source(
         return source[:600]
     if f.line_start < 1 or f.line_start > len(lines):
         return None
-    start = max(0, (f.line_start or 1) - 3)
+    # Window centered on the finding: 3 lines above, 4 below. lines is
+    # 0-indexed, line_start is 1-based — the first shown line (1-based) is
+    # line_start - 3, i.e. index line_start - 1 - 3.
+    start = max(0, f.line_start - 1 - 3)
     end = min(len(lines), (f.line_end or f.line_start or 1) + 3)
     window = lines[start:end]
     prefix = f"  L{start + 1}…" if start > 0 else ""

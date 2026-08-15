@@ -198,7 +198,12 @@ def index_repository(
             # file_entry_hashes(new_hash) never contains this file and it gets
             # re-parsed on every subsequent commit (cache thrash).
             old_entry = db.get_file_entry(cache_key, last_hash, rel)
-            assert old_entry is not None
+            if old_entry is None:
+                # Explicit raise, not an assert — asserts vanish under -O.
+                raise RuntimeError(
+                    f"cache inconsistency: {rel} hashed equal under {last_hash} "
+                    f"but its file entry is missing"
+                )
             db.upsert_file_entry(cache_key, head_hash, old_entry)
             file_syms = db.symbols_in_file(cache_key, last_hash, rel)
             if file_syms:
@@ -209,7 +214,7 @@ def index_repository(
         result.parsed_files += 1
         result.changed_files.append(rel)
 
-        ast_json, symbols_json, symbols, byte_count = _parse_fached(fpath, language)
+        ast_json, symbols_json, symbols, byte_count = _parse_file(fpath, language)
         entry = FileEntry(
             rel_path=rel,
             language=language,
@@ -227,7 +232,3 @@ def index_repository(
 
     db.upsert_index_run(cache_key, head_hash, file_count=result.total_files)
     return result
-
-
-def _parse_fached(path: Path, language: str):
-    return _parse_file(path, language)
