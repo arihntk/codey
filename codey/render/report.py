@@ -87,7 +87,7 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
     agent_table.add_column("Status", style="white")
     agent_table.add_column("Findings", justify="right")
     agent_table.add_column("Tokens", justify="right", style="dim")
-    agent_table.add_column("Summary", style="dim", overflow="fold")
+    agent_table.add_column("Summary", ratio=1, overflow="fold")
 
     for name in ("index", "security", "code_quality", "test"):
         report = review.agent_reports.get(name)
@@ -98,7 +98,7 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
             report.status,
             str(report.finding_count()),
             str(report.token_usage),
-            report.summary,
+            Markdown(report.summary) if report.summary else Text("(no summary)", style="dim"),
         )
     console.print(agent_table)
 
