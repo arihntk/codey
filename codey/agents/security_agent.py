@@ -138,6 +138,7 @@ def run_security_agent(
         tool_findings.extend(_parse_tool_results(src, raw_results[src]))
 
     token_usage = 0
+    report_error: str | None = None
 
     # 3. LLM judgement. The LLM always reviews the diff (when available) —
     #    even if no tool flagged anything — so non-secret confidentiality
@@ -146,7 +147,7 @@ def run_security_agent(
     #    hardcoded one is dropped, to avoid duplicates).
     llm_findings: list[Finding] = []
     if llm is not None:
-        synthesised, _usage = _llm_synthesise(
+        synthesised, _usage, synth_error = _llm_synthesise(
             llm,
             raw_results,
             ctx.full_diff,
@@ -154,7 +155,12 @@ def run_security_agent(
             hardcoded_findings=hardcoded,
         )
         token_usage = _usage
-        llm_findings = _parse_llm_findings(synthesised)
+        if synth_error is not None:
+            report_error = synth_error
+        else:
+            llm_findings = _parse_llm_findings(synthesised)
+            if not _llm_output_is_parseable(synthesised):
+                report_error = "LLM returned unparseable output (expected a JSON array of findings)"
 
     # Merge: LLM findings first (broader confidentiality judgement), then
     # tool findings, then hardcoded-secret findings — dropping any LLM/tool
@@ -170,7 +176,7 @@ def run_security_agent(
         findings.append(f)
     findings.extend(hardcoded)
 
-    if not findings:
+    if not findings and report_error is None:
         tool_evidence = "; ".join(f"{k}: 0 issues" for k in raw_results) or "no external tools ran"
         findings.append(Finding(
             category=FindingCategory.SECURITY,
@@ -203,16 +209,19 @@ def run_security_agent(
         f"Found {len(findings)} finding(s)."
         + (f" Issues: {finding_details}." if finding_details else "")
     )
+    if report_error is not None:
+        summary += f" Warning: LLM review failed ({report_error})."
     metadata = {k: v[:2000] for k, v in raw_results.items()}
     if hardcoded:
         metadata["hardcoded_secrets"] = f"{len(hardcoded)} finding(s) from deterministic detector"
     return AgentReport(
         agent="security",
-        status="completed",
+        status="error" if report_error is not None else "completed",
         summary=summary,
         findings=findings,
         metadata=metadata,
         token_usage=token_usage,
+        error=report_error,
     )
 
 
@@ -392,7 +401,7 @@ def _llm_synthesise(
     changed_files: list[str],
     *,
     hardcoded_findings: list[Finding] | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int, str | None]:
     """Ask the LLM to merge tool outputs + hardcoded-secret findings and
     ADD its own confidentiality-judgement findings for issues that have no
     easy regex anchor (PII, internal endpoints, crypto/auth mistakes, etc.).
@@ -401,7 +410,10 @@ def _llm_synthesise(
     gitleaks produced output — so confidential-info leaks are judged, not
     just secrets.
 
-    Returns ``(text, token_usage)``.
+    Returns ``(text, token_usage, error)`` where ``error`` is set when the
+    LLM call itself failed (rate limit exhausted, provider error, timeout).
+    Unparseable output is *not* treated as an error here — the caller
+    distinguishes it after parsing.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -425,26 +437,26 @@ def _llm_synthesise(
             )),
         ])
         text = extract_text(response)
-        return text, response_tokens(response, fallback_text=text)
+        return text, response_tokens(response, fallback_text=text), None
     except Exception as e:
-        return f"[] // LLM synthesis failed: {e}", 0
+        return "", 0, str(e)
 
 
 def _parse_llm_findings(text: str) -> list[Finding]:
-    """Parse LLM JSON output into Finding objects."""
-    # Strip markdown code fences if present.
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    """Parse LLM JSON output into Finding objects.
+
+    Returns ``[]`` both for a valid empty array and for unparseable output.
+    Callers that need to distinguish the two should check
+    :func:`_llm_output_is_parseable` first.
+    """
+    stripped = _strip_code_fences(text)
     try:
-        data = json.loads(text)
+        data = json.loads(stripped)
     except json.JSONDecodeError:
         return []
     findings: list[Finding] = []
     for item in data:
         try:
-            evidence = item.get("evidence", "")
             findings.append(Finding(
                 category=FindingCategory.SECURITY,
                 severity=Severity(item.get("severity", "info").lower()),
@@ -453,10 +465,28 @@ def _parse_llm_findings(text: str) -> list[Finding]:
                 file_path=item.get("file_path"),
                 line_start=item.get("line_start"),
                 line_end=item.get("line_end"),
-                evidence=evidence,
+                evidence=item.get("evidence", ""),
                 recommendation=item.get("recommendation", ""),
                 confidence=float(item.get("confidence", 0.7)),
             ))
         except (ValueError, TypeError):
             continue
     return findings
+
+
+def _llm_output_is_parseable(text: str) -> bool:
+    """True when *text* parses as a JSON array (possibly empty)."""
+    try:
+        json.loads(_strip_code_fences(text))
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove an enclosing markdown ``` code fence, if present."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        stripped = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    return stripped

@@ -43,9 +43,15 @@ def run_codey_agent(
     ctx: ReviewContext,
     agent_reports: dict[str, AgentReport],
     primary_llm: object | None,
+    *,
+    prior_errors: list[str] | None = None,
 ) -> ReviewSummary:
-    """Synthesise all agent reports into a final ReviewSummary."""
+    """Synthesise all agent reports into a final ReviewSummary.
 
+    ``prior_errors`` (from the graph state) are propagated into the review's
+    ``errors`` field along with any errors surfaced by the agents themselves,
+    so a failing LLM call is never silently presented as a clean review.
+    """
     all_findings: list[Finding] = []
     for r in agent_reports.values():
         all_findings.extend(r.findings)
@@ -55,10 +61,20 @@ def run_codey_agent(
 
     summary_text = _build_text_summary(ctx, agent_reports, overall, rec)
 
+    synth_error: str | None = None
     if primary_llm is not None:
-        llm_summary, _used = _llm_synthesise(primary_llm, agent_reports, ctx)
+        llm_summary, _used, synth_error = _llm_synthesise(primary_llm, agent_reports, ctx)
         if llm_summary:
             summary_text = llm_summary
+
+    # Collect structured errors: prior graph errors, agent-level errors, and
+    # orchestrator synthesis errors — never silently dropped.
+    errors: list[str] = list(prior_errors or [])
+    for r in agent_reports.values():
+        if r.status == "error" and r.error:
+            errors.append(f"[{r.agent}] {r.error}")
+    if synth_error is not None:
+        errors.append(f"[codey] summary synthesis failed: {synth_error}")
 
     review = ReviewSummary(
         overall_severity=overall,
@@ -70,6 +86,7 @@ def run_codey_agent(
         agent_reports=agent_reports,
         total_findings=len(all_findings),
         recommendation=rec,
+        errors=errors,
     )
     return review
 
@@ -120,8 +137,13 @@ def _llm_synthesise(
     llm: object,
     reports: dict[str, AgentReport],
     ctx: ReviewContext,
-) -> tuple[str, int]:
-    """Ask the LLM to write an executive summary."""
+) -> tuple[str, int, str | None]:
+    """Ask the LLM to write an executive summary.
+
+    Returns ``(summary, token_usage, error)`` — ``error`` is set when the
+    LLM call itself failed; unparseable output falls back to the raw text
+    and is reported as a parse error.
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
 
     # Serialize reports compactly.
@@ -161,11 +183,14 @@ def _llm_synthesise(
         if text.startswith("```"):
             lines = text.split("\n")
             text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+        usage = response_tokens(response, fallback_text=raw)
         try:
             obj = json.loads(text)
             summary = obj.get("summary", text)
-            return summary, response_tokens(response, fallback_text=raw)
+            return summary, usage, None
         except json.JSONDecodeError:
-            return text, response_tokens(response, fallback_text=raw)
-    except Exception:
-        return "", 0
+            # LLM output wasn't valid JSON — surface it instead of silently
+            # using raw text as the summary.
+            return text, usage, "LLM output was not valid JSON"
+    except Exception as e:
+        return "", 0, str(e)

@@ -19,7 +19,7 @@ from codey.agents.code_quality_agent import run_code_quality_agent
 from codey.agents.codey_agent import run_codey_agent
 from codey.agents.context import ReviewContext
 from codey.agents.index_agent import run_index_agent
-from codey.agents.schemas import AgentReport, ReviewSummary
+from codey.agents.schemas import AgentReport, ReviewSummary, Severity
 from codey.agents.security_agent import run_security_agent
 from codey.agents.test_agent import run_test_agent
 from codey.graph.state import ReviewState, initial_state
@@ -33,21 +33,29 @@ def _index_node(state: ReviewState) -> dict[str, Any]:
     if db is None:
         return {"progress": ["index skipped (no db)"], "errors": ["no db"]}
     primary_llm = state.get("primary_llm")
-    report, index_summary = run_index_agent(ctx, db, primary_llm)
+    try:
+        report, index_summary = run_index_agent(ctx, db, primary_llm)
+    except Exception as e:
+        return {"progress": ["index: error"], "errors": [f"[index] {e}"]}
     return {
         "agent_reports": {"index": report},
         "index_summary": index_summary,
         "progress": [f"index: {report.status}"],
+        "errors": ([f"[index] {report.error}"] if report.error else []),
     }
 
 
 def _security_node(state: ReviewState) -> dict[str, Any]:
     ctx: ReviewContext = state["context"]
     primary_llm = state.get("primary_llm")
-    report = run_security_agent(ctx, db=ctx.db, llm=primary_llm)
+    try:
+        report = run_security_agent(ctx, db=ctx.db, llm=primary_llm)
+    except Exception as e:
+        return {"progress": ["security: error"], "errors": [f"[security] {e}"]}
     return {
         "agent_reports": {"security": report},
         "progress": [f"security: {report.status}"],
+        "errors": ([f"[security] {report.error}"] if report.error else []),
     }
 
 
@@ -56,20 +64,28 @@ def _code_quality_node(state: ReviewState) -> dict[str, Any]:
     # Inject the index summary from the prior index agent.
     ctx.index_summary = state.get("index_summary", "")
     primary_llm = state.get("primary_llm")
-    report = run_code_quality_agent(ctx, db=ctx.db, llm=primary_llm)
+    try:
+        report = run_code_quality_agent(ctx, db=ctx.db, llm=primary_llm)
+    except Exception as e:
+        return {"progress": ["code_quality: error"], "errors": [f"[code_quality] {e}"]}
     return {
         "agent_reports": {"code_quality": report},
         "progress": [f"code_quality: {report.status}"],
+        "errors": ([f"[code_quality] {report.error}"] if report.error else []),
     }
 
 
 def _test_node(state: ReviewState) -> dict[str, Any]:
     ctx: ReviewContext = state["context"]
     primary_llm = state.get("primary_llm")
-    report = run_test_agent(ctx, db=ctx.db, llm=primary_llm)
+    try:
+        report = run_test_agent(ctx, db=ctx.db, llm=primary_llm)
+    except Exception as e:
+        return {"progress": ["test: error"], "errors": [f"[test] {e}"]}
     return {
         "agent_reports": {"test": report},
         "progress": [f"test: {report.status}"],
+        "errors": ([f"[test] {report.error}"] if report.error else []),
     }
 
 
@@ -77,7 +93,24 @@ def _codey_node(state: ReviewState) -> dict[str, Any]:
     ctx: ReviewContext = state["context"]
     primary_llm = state.get("primary_llm")
     reports: dict[str, AgentReport] = state.get("agent_reports", {})
-    review = run_codey_agent(ctx, reports, primary_llm)
+    try:
+        review = run_codey_agent(
+            ctx,
+            reports,
+            primary_llm,
+            prior_errors=state.get("errors", []),
+        )
+    except Exception as e:
+        # Final fallback: never leave the caller with no review object.
+        review = ReviewSummary(
+            overall_severity=Severity.INFO,
+            summary=f"Review synthesis failed: {e}",
+            commit_hash=ctx.git_hash,
+            commit_message=ctx.commit_message,
+            agent_reports=reports,
+            total_findings=sum(len(r.findings) for r in reports.values()),
+            errors=[f"[codey] {e}"] + list(state.get("errors", [])),
+        )
     return {
         "final_review": review,
         "progress": ["codey: synthesis complete"],

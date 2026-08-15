@@ -51,6 +51,7 @@ def run_index_agent(
     index_summary = overview
     findings: list[Finding] = []
     token_usage = 0
+    report_error: str | None = None
 
     if llm is not None:
         try:
@@ -63,13 +64,7 @@ def run_index_agent(
             index_summary = extract_text(response)
             token_usage = response_tokens(response, fallback_text=index_summary)
         except Exception as e:
-            findings.append(Finding(
-                category=FindingCategory.ARCHITECTURE,
-                severity=Severity.LOW,
-                title="Index LLM summarisation failed",
-                description=str(e),
-                confidence=0.5,
-            ))
+            report_error = f"Index LLM summarisation failed: {e}"
 
     findings.insert(0, Finding(
         category=FindingCategory.ARCHITECTURE,
@@ -88,7 +83,7 @@ def run_index_agent(
 
     report = AgentReport(
         agent="index",
-        status="completed",
+        status="error" if report_error is not None else "completed",
         summary=index_summary[:500] if index_summary else (
             f"Indexed {index_result.total_files} files, "
             f"{index_result.symbols_extracted} symbols."
@@ -102,6 +97,7 @@ def run_index_agent(
             "symbols_extracted": str(index_result.symbols_extracted),
         },
         token_usage=token_usage,
+        error=report_error,
     )
     return report, index_summary
 

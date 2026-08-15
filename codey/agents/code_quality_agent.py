@@ -67,6 +67,7 @@ def run_code_quality_agent(
     diff_text = _build_diff_context(ctx)
     arch_context = ctx.index_summary or "(no architecture summary available)"
 
+    report_error: str | None = None
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -80,16 +81,12 @@ def run_code_quality_agent(
         raw = extract_text(response)
         token_usage = response_tokens(response, fallback_text=raw)
         findings = _parse_llm_findings(raw)
+        if not _llm_output_is_parseable(raw):
+            report_error = "LLM returned unparseable output (expected a JSON array of findings)"
     except Exception as e:
-        findings.append(Finding(
-            category=FindingCategory.CODE_QUALITY,
-            severity=Severity.LOW,
-            title="Code quality LLM analysis failed",
-            description=str(e),
-            confidence=0.3,
-        ))
+        report_error = str(e)
 
-    if not findings:
+    if not findings and report_error is None:
         findings.append(Finding(
             category=FindingCategory.CODE_QUALITY,
             severity=Severity.INFO,
@@ -119,10 +116,12 @@ def run_code_quality_agent(
     )
     if finding_details:
         summary += f" Issues: {finding_details}."
+    if report_error is not None:
+        summary += f" Warning: LLM analysis failed ({report_error})."
 
     return AgentReport(
         agent="code_quality",
-        status="completed",
+        status="error" if report_error is not None else "completed",
         summary=summary,
         findings=findings,
         metadata={
@@ -130,7 +129,21 @@ def run_code_quality_agent(
             "dependent_files": str(len(ctx.dependent_files)),
         },
         token_usage=token_usage,
+        error=report_error,
     )
+
+
+def _llm_output_is_parseable(text: str) -> bool:
+    """True when *text* parses as a JSON array (possibly empty)."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        stripped = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    try:
+        json.loads(stripped)
+        return True
+    except json.JSONDecodeError:
+        return False
 
 
 def _build_diff_context(ctx: ReviewContext, *, max_chars: int = 16_000) -> str:

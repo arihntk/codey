@@ -97,6 +97,11 @@ class ReviewSummary(BaseModel):
     agent_reports: dict[str, AgentReport] = Field(default_factory=dict)
     total_findings: int = 0
     recommendation: Literal["approve", "request_changes", "block"] = "approve"
+    errors: list[str] = Field(
+        default_factory=list,
+        description="Structured errors encountered during the review (agent LLM "
+        "failures, unparseable output, pipeline issues). Never silently dropped.",
+    )
 
     def all_findings(self) -> list[Finding]:
         out: list[Finding] = []

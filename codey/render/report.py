@@ -66,8 +66,18 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
     header.add_row("Recommendation:", Text(rec_text, style=rec_style))
     header.add_row("Overall severity:", Text(review.overall_severity.value.upper(),
                                              style=severity_style(review.overall_severity)))
+    if review.errors:
+        header.add_row("Errors:", Text(f"{len(review.errors)} agent error(s)", style="red"))
 
     console.print(Panel(header, title="[bold]Codey Review[/]", border_style="blue", padding=(1, 2)))
+
+    # Surface structured errors prominently instead of hiding them.
+    if review.errors:
+        console.print()
+        console.print("[bold red]Agent errors[/]")
+        for err in review.errors:
+            console.print(f"  [red]×[/] {err}")
+        console.print()
 
     # Executive summary as markdown.
     console.print()
@@ -90,9 +100,13 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
         report = review.agent_reports.get(name)
         if not report:
             continue
+        status_text = Text(
+            report.status,
+            style="bold red" if report.status == "error" else ("yellow" if report.status == "skipped" else "green"),
+        )
         agent_table.add_row(
             report.agent,
-            report.status,
+            status_text,
             str(report.finding_count()),
             str(report.token_usage),
             Markdown(report.summary) if report.summary else Text("(no summary)", style="dim"),

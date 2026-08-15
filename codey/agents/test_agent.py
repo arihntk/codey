@@ -132,6 +132,7 @@ def run_test_agent(
 
     # Use LLM to narrow test scope if available.
     test_targets: list[str] = []
+    report_error: str | None = None
     if llm is not None and ctx.changed_files:
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -154,10 +155,10 @@ def run_test_agent(
             try:
                 test_targets = json.loads(text)
             except json.JSONDecodeError:
-                test_targets = []
+                report_error = "LLM returned unparseable test-target output (expected a JSON array)"
             token_usage = response_tokens(response, fallback_text=raw)
-        except Exception:
-            pass
+        except Exception as e:
+            report_error = f"LLM test-target selection failed: {e}"
 
     for framework, cmd in frameworks:
         full_cmd = list(cmd)
@@ -200,12 +201,15 @@ def run_test_agent(
         )
         if failed_details:
             summary += f" Failures: {failed_details}."
+    if report_error is not None:
+        summary += f" Warning: {report_error}."
 
     return AgentReport(
         agent="test",
-        status="completed",
+        status="error" if report_error is not None else "completed",
         summary=summary,
         findings=findings,
         metadata=metadata,
         token_usage=token_usage,
+        error=report_error,
     )
