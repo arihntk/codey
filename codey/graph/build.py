@@ -113,7 +113,6 @@ def run_review(
     ctx: ReviewContext,
     *,
     primary_llm: object | None = None,
-    summarizer_llm: object | None = None,
     progress_callback=None,
 ) -> ReviewSummary:
     """Build the graph and execute the review pipeline.
@@ -121,7 +120,7 @@ def run_review(
     Returns the final ``ReviewSummary``.
     """
     graph = build_graph()
-    state = initial_state(ctx, primary_llm=primary_llm, summarizer_llm=summarizer_llm)
+    state = initial_state(ctx, primary_llm=primary_llm)
 
     final_state: ReviewState = state
     if progress_callback is not None:

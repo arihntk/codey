@@ -95,13 +95,14 @@ def run_pipeline(
     )
 
     # 4. Summarise large diffs via the cheap/fast model.
+    #    `_summarise_if_needed` replaces the raw diff text with a compact
+    #    summary, and `full_diff` is assembled *after* this step (below), so
+    #    agents see the summaries instead of raw hunks for very large changes.
     large_diffs: list[str] = []
     if summarizer_llm is not None:
         for path, text in diffs.items():
             if len(text) > _LARGE_DIFF_THRESHOLD:
                 large_diffs.append(path)
-        # Note: summarisation happens inside agent prompts via DiffChunk
-        # token budgeting, not inline here (keeps the pipeline lean).
         _summarise_if_needed(
             safeguard=primary_llm is not None,
             summarizer=summarizer_llm,
@@ -133,7 +134,6 @@ def run_pipeline(
     review = run_review(
         ctx,
         primary_llm=primary_llm,
-        summarizer_llm=summarizer_llm,
         progress_callback=progress_callback,
     )
 
@@ -153,8 +153,13 @@ def _summarise_if_needed(*, safeguard: bool, summarizer, diffs: dict[str, str], 
         diffs[s.path] = s.summary
 
 
-def _prune_to_budget(ctx: ReviewContext, *, max_tokens: int = 100_000) -> None:
-    """Drop low-priority chunks if the total context exceeds the model budget."""
+def _prune_to_budget(ctx: ReviewContext) -> None:
+    """Drop low-priority chunks if the total context exceeds the model budget.
+
+    Uses ``ctx.max_tokens`` as the budget (no hardcoded constant). Chunks are
+    kept largest-first and the rest discarded.
+    """
+    max_tokens = ctx.max_tokens
     if not ctx.diff_chunks:
         return
     total = sum(len(c.diff_text) // 4 for c in ctx.diff_chunks)

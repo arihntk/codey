@@ -47,9 +47,8 @@ class ReviewState(TypedDict, total=False):
     # Progress events for the progress emitter (parallel-safe via add reducer).
     progress: Annotated[list[str], add]
 
-    # LLM objects (primary + summarizer), set at graph build time.
+    # LLM object (primary), set at graph build time.
     primary_llm: object
-    summarizer_llm: object
 
     # Error tracking (parallel-safe).
     errors: Annotated[list[str], add]
@@ -59,7 +58,6 @@ def initial_state(
     ctx: ReviewContext,
     *,
     primary_llm: object | None = None,
-    summarizer_llm: object | None = None,
 ) -> ReviewState:
     """Build the initial state for the review graph."""
     return ReviewState(
@@ -70,5 +68,4 @@ def initial_state(
         errors=[],
         messages=[],
         primary_llm=primary_llm,
-        summarizer_llm=summarizer_llm,
     )

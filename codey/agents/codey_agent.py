@@ -104,7 +104,6 @@ def _build_text_summary(
                     lines.append(f"  - {f.recommendation}")
         lines.append("")
     lines.append("---")
-    lines.append("*Run `codey review --report <agent>` to view a standalone report.*")
     return "\n".join(lines)
 
 
