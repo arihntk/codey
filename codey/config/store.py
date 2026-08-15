@@ -139,7 +139,10 @@ def delete_api_key(preset: ProviderPreset, *, account: str = "default") -> None:
 
 
 def is_provider_configured(preset: ProviderPreset) -> bool:
-    """True when an API key (and base_url if required) are available."""
+    """True when the provider is usable: an API key exists (when required)
+    and any required base URL is set."""
+    if not preset.requires_api_key:
+        return True
     if get_api_key(preset):
         return True
     return bool(preset.env_key_var and os.environ.get(preset.env_key_var))
@@ -148,20 +151,28 @@ def is_provider_configured(preset: ProviderPreset) -> bool:
 def resolve_provider(cfg: Config) -> tuple[ProviderPreset, str, str | None]:
     """Resolve the active provider preset, API key, and base URL.
 
-    Raises ``ConfigError`` if incomplete.
+    Raises ``ConfigError`` if incomplete. Providers that don't require an API
+    key (e.g. local OpenAI-compatible servers) skip the key lookup and return
+    a placeholder key so the langchain client constructor accepts them.
     """
     if not cfg.is_complete():
         raise ConfigError("No provider configured. Run `codey set` first.")
     preset = get_preset(cfg.provider)
     if preset is None:
         raise ConfigError(f"Unknown provider '{cfg.provider}'. Run `codey set`.")
-    api_key = get_api_key(preset)
-    if not api_key and preset.env_key_var:
-        api_key = os.environ.get(preset.env_key_var)
-    if not api_key:
-        raise ConfigError(
-            f"No API key found for {preset.label}. Run `codey set` to configure it."
-        )
+    api_key = ""
+    if preset.requires_api_key:
+        api_key = get_api_key(preset)
+        if not api_key and preset.env_key_var:
+            api_key = os.environ.get(preset.env_key_var)
+        if not api_key:
+            raise ConfigError(
+                f"No API key found for {preset.label}. Run `codey set` to configure it."
+            )
+    else:
+        # Local endpoints accept any non-empty key; a placeholder keeps the
+        # langchain client happy without exposing a real credential.
+        api_key = "local"
     base_url = cfg.base_url
     if preset.env_base_url_var and not base_url:
         env_base = os.environ.get(preset.env_base_url_var)

@@ -54,13 +54,22 @@ class TestConfigProviders:
     def test_presets_exist(self):
         from codey.config.providers import PRESETS, get_preset
 
-        assert len(PRESETS) == 5
+        assert len(PRESETS) == 6
         assert get_preset("openai") is not None
         assert get_preset("anthropic") is not None
         assert get_preset("deepseek") is not None
         assert get_preset("google") is not None
         assert get_preset("custom") is not None
+        assert get_preset("local") is not None
         assert get_preset("nonexistent") is None
+
+    def test_local_provider_is_keyless(self):
+        from codey.config.providers import get_preset
+
+        p = get_preset("local")
+        assert p is not None
+        assert p.requires_api_key is False
+        assert p.requires_base_url is True
 
     def test_config_round_trip(self):
         from codey.config.store import Config, load_config, save_config

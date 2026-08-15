@@ -8,7 +8,6 @@ same provider but a smaller/faster model tier.
 from __future__ import annotations
 
 import importlib
-import os
 from dataclasses import dataclass
 
 from codey.config.providers import ProviderPreset
@@ -45,7 +44,8 @@ def _instantiate(
     The API key is passed to the client constructor directly. It is NEVER
     written into ``os.environ`` — the security/test agents spawn subprocesses
     that execute repo code, and a malicious repo could exfiltrate an
-    env-injected key.
+    env-injected key. (All langchain clients in the current versions accept
+    an ``api_key`` constructor kwarg, Google included.)
     """
     module = importlib.import_module(preset.langchain_module)
     cls = getattr(module, preset.langchain_class)
@@ -66,15 +66,6 @@ def _instantiate(
     except TypeError:
         kwargs.pop("max_retries", None)
         model = cls(**kwargs)
-
-    # Some providers (notably Google's ChatGoogleGenerativeAI) ignore an
-    # api_key kwarg and read their key from an environment variable. Setting
-    # it here is safe: every subprocess spawned by codey (bandit, semgrep,
-    # gitleaks, test commands, git) uses codey.process.scrubbed_env, which
-    # strips credential variables — the key can never leak into code running
-    # the repo under review.
-    if preset.key == "google":
-        os.environ[preset.env_key_var] = api_key
     return model
 
 

@@ -19,6 +19,7 @@ class ProviderPreset:
     summarizer_model: str
     recommended_models: list[str] = field(default_factory=list)
     requires_base_url: bool = False
+    requires_api_key: bool = True
 
     @property
     def keyring_service(self) -> str:
@@ -90,7 +91,21 @@ CUSTOM = ProviderPreset(
     requires_base_url=True,
 )
 
-PRESETS: list[ProviderPreset] = [OPENAI, ANTHROPIC, DEEPSEEK, GOOGLE, CUSTOM]
+LOCAL = ProviderPreset(
+    key="local",
+    label="Local (Ollama / LM Studio / llama.cpp)",
+    langchain_module="langchain_openai",
+    langchain_class="ChatOpenAI",
+    env_key_var="",
+    env_base_url_var="LOCAL_MODEL_BASE_URL",
+    default_model="llama3.2",
+    summarizer_model="llama3.2",
+    recommended_models=["llama3.2", "llama3.1", "qwen2.5", "mistral", "phi3", "gemma2"],
+    requires_base_url=True,
+    requires_api_key=False,
+)
+
+PRESETS: list[ProviderPreset] = [OPENAI, ANTHROPIC, DEEPSEEK, GOOGLE, CUSTOM, LOCAL]
 
 _PRESET_MAP: dict[str, ProviderPreset] = {p.key: p for p in PRESETS}
 

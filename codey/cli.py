@@ -77,24 +77,30 @@ def set_config():
     preset = presets[choice - 1]
 
     # Ask only the API key for built-in providers (unless already in env).
+    # Keyless providers (local OpenAI-compatible servers) skip this entirely.
     api_key = ""
-    if preset.env_key_var and not is_provider_configured(preset):
-        key_prompt = f"Enter your {preset.label} API key"
-        api_key = Prompt.ask(key_prompt, console=console, password=True)
-        if not api_key.strip():
-            console.print("[red]API key is required.[/]")
-            raise typer.Exit(1)
-    elif preset.env_key_var:
-        # Already configured via env or keyring; reuse.
-        api_key = get_api_key(preset) or ""
+    if preset.requires_api_key:
+        if preset.env_key_var and not is_provider_configured(preset):
+            key_prompt = f"Enter your {preset.label} API key"
+            api_key = Prompt.ask(key_prompt, console=console, password=True)
+            if not api_key.strip():
+                console.print("[red]API key is required.[/]")
+                raise typer.Exit(1)
+        elif preset.env_key_var:
+            # Already configured via env or keyring; reuse.
+            api_key = get_api_key(preset) or ""
 
     base_url: str | None = None
     if preset.requires_base_url:
-        base_url = Prompt.ask(f"Enter base URL for {preset.label} (OpenAI-compatible)", console=console)
+        default_hint = " (e.g. http://localhost:11434/v1 for Ollama)" if not preset.requires_api_key else ""
+        base_url = Prompt.ask(
+            f"Enter base URL for {preset.label} (OpenAI-compatible){default_hint}",
+            console=console,
+        )
         if not base_url.strip():
             console.print("[red]Base URL is required for custom providers.[/]")
             raise typer.Exit(1)
-        if not api_key.strip():
+        if not api_key.strip() and preset.requires_api_key:
             api_key = Prompt.ask("Enter API key", console=console, password=True)
 
     # Choose model.
@@ -145,8 +151,10 @@ def set_config():
     )
     save_config(cfg)
 
-    # Save API key to the OS keyring.
-    if api_key.strip():
+    # Save API key to the OS keyring (keyless providers skip this).
+    if not preset.requires_api_key:
+        console.print(f"[dim]No API key needed for {preset.label} (local endpoint).[/]")
+    elif api_key.strip():
         try:
             set_api_key(preset, api_key.strip())
             console.print(f"[green]✓[/] API key stored in OS keyring for {preset.label}")
@@ -362,6 +370,10 @@ def config_cmd(
             console.print("[yellow]No provider configured. Run `codey set` first.[/]")
             raise typer.Exit(1)
         has_key = is_provider_configured(preset)
+        key_state = (
+            "[dim]not required (local)[/]" if not preset.requires_api_key
+            else "[green]configured[/]" if has_key else "[red]missing[/]"
+        )
         append_state = (
             "[green]enabled[/]" if cfg.append_summary_to_commit
             else "[red]disabled[/]" if cfg.append_summary_to_commit is False
@@ -372,7 +384,7 @@ def config_cmd(
             f"Model:           [bold]{cfg.model}[/]\n"
             f"Summarizer:      [bold]{cfg.summarizer_model or '(same)'}[/]\n"
             f"Base URL:        {cfg.base_url or '(default)'}\n"
-            f"API key:         {'[green]configured[/]' if has_key else '[red]missing[/]'}\n"
+            f"API key:         {key_state}\n"
             f"Append summary:  {append_state}",
             title="[bold]Codey Configuration[/]",
             border_style="blue",

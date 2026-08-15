@@ -9,11 +9,22 @@
 Codey orchestrates specialized agents — security, code quality, testing, and indexing — over your local git diff, with tree-sitter AST caching and jedi-based reverse-dependency lookup. Built on [LangGraph](https://github.com/langchain-ai/langgraph).
 
 ```
-codey set      # configure provider & API key (OpenAI / Anthropic / DeepSeek / Google / custom)
+codey set      # configure provider & API key (OpenAI / Anthropic / DeepSeek / Google / custom / local)
 codey model    # view or switch the active model
 codey config   # show current configuration
 codey review   # review the latest commit in the local repo
 ```
+
+## Providers
+
+| Provider | Key required | Notes |
+|----------|-------------|-------|
+| OpenAI | yes | `gpt-4.1`, `gpt-4o`, `o3-mini` |
+| Anthropic | yes | Claude models |
+| DeepSeek | yes | `deepseek-chat`, `deepseek-reasoner` |
+| Google | yes | Gemini models |
+| Custom (OpenAI-compatible) | yes | any `base_url` |
+| **Local** | **no** | Ollama / LM Studio / llama.cpp / vLLM via their OpenAI-compatible `/v1` endpoint — enter e.g. `http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio) as the base URL, then pick a model name you've pulled. No API key is stored or sent. |
 
 ## Features
 
