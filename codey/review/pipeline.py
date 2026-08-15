@@ -99,18 +99,21 @@ def run_pipeline(
             scan_repo = repo
 
         # 3. Index the scan tree (so symbol table is fresh for chunking + deps).
-        #    This also builds the call graph.
+        #    This also builds the call graph. The cache is keyed on the
+        #    CANONICAL repo path (not the transient worktree) so non-HEAD
+        #    reviews hit the shared cache instead of re-indexing and leaving
+        #    orphaned rows for deleted tmpdirs.
         from codey.index.callgraph import build_call_graph
         from codey.index.indexer import index_repository
 
-        index_result = index_repository(scan_repo, db)
-        build_call_graph(scan_repo, index_result.git_hash, db)
+        index_result = index_repository(scan_repo, db, cache_repo_path=repo)
+        build_call_graph(scan_repo, index_result.git_hash, db, cache_repo_path=repo)
 
         # 4. Chunk diffs (function/class level) using cached symbol table.
         chunk_list = chunk_diff(
             diffs,
             db=db,
-            repo_path=str(scan_repo),
+            repo_path=str(repo),
             git_hash=index_result.git_hash,
         )
 
@@ -149,6 +152,7 @@ def run_pipeline(
             raw_full_diff=raw_full_diff,
             db=db,
             run_tests=run_tests,
+            cache_repo_path=repo,
         )
 
         # 8. Fetch dependent (affected-but-unmodified) files + source snippets.

@@ -85,7 +85,11 @@ def chunk_diff(
     git_hash: str = "",
     file_sources: dict[str, str] | None = None,
 ) -> list[DiffChunk]:
-    """Chunk a full diff mapping {path -> diff_text} into DiffChunk objects."""
+    """Chunk a full diff mapping {path -> diff_text} into DiffChunk objects.
+
+    ``repo_path`` is the cache key (canonical repo path, not a temp worktree
+    path) so symbol lookups hit the shared cache for non-HEAD reviews.
+    """
     file_sources = file_sources or {}
     all_chunks: list[DiffChunk] = []
     for path, text in diffs.items():

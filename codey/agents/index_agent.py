@@ -47,12 +47,13 @@ def run_index_agent(
     Returns (AgentReport, index_summary_string).
     """
     repo = ctx.repo_path
-    if not db.has_indexed_hash(str(repo), ctx.git_hash):
-        index_result = index_repository(repo, db)
-        build_call_graph(repo, index_result.git_hash, db)
+    cache_key = str(ctx.cache_repo_path or repo)
+    if not db.has_indexed_hash(cache_key, ctx.git_hash):
+        index_result = index_repository(repo, db, cache_repo_path=ctx.cache_repo_path)
+        build_call_graph(repo, index_result.git_hash, db, cache_repo_path=ctx.cache_repo_path)
     else:
         # Pipeline already indexed this hash; just report cached counts.
-        cached_paths = db.list_file_rel_paths(str(repo), ctx.git_hash)
+        cached_paths = db.list_file_rel_paths(cache_key, ctx.git_hash)
         index_result = IndexResult(
             git_hash=ctx.git_hash,
             total_files=len(cached_paths),
@@ -60,7 +61,7 @@ def run_index_agent(
         )
 
     # Build symbol overview for the LLM.
-    overview = _build_symbol_overview(db, str(repo), index_result.git_hash)
+    overview = _build_symbol_overview(db, cache_key, index_result.git_hash)
 
     index_summary = overview
     findings: list[Finding] = []

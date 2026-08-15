@@ -41,6 +41,12 @@ class ReviewContext:
     index_summary: str = ""  # architecture/design summary from indexer
     max_tokens: int = 100_000  # context window budget
     run_tests: bool = False  # execute detected test commands (opt-in; see CLI)
+    cache_repo_path: Path | None = field(
+        default=None,
+        # Canonical repo used as the cache key when repo_path is a temporary
+        # worktree (non-HEAD reviews). File reads use repo_path; DB keys use
+        # this so temp worktrees never pollute or miss the cache.
+    )
     pruned_chunks: list[str] = field(
         default_factory=list,
         # Chunk ranges dropped by context-budget pruning, e.g. 'path:10-25'.

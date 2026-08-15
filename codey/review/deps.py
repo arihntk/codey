@@ -23,11 +23,18 @@ def fetch_dependent_files(
     git_hash: str,
     db: CacheDB,
     changed_files: list[str],
+    *,
+    cache_repo_path: Path | None = None,
 ) -> list[str]:
-    """Find files that depend on changed files, excluding the changed files themselves."""
+    """Find files that depend on changed files, excluding the changed files themselves.
+
+    ``cache_repo_path`` is the canonical repo used as the cache key when
+    ``repo_path`` is a temporary worktree (non-HEAD reviews).
+    """
     if not changed_files:
         return []
     repo = repo_path.resolve()
+    cache_key = str(Path(cache_repo_path or repo).resolve())
     affected = [str((repo / f).resolve()) for f in changed_files]
     deps = reverse_dependencies(
         repo,
@@ -35,6 +42,7 @@ def fetch_dependent_files(
         db,
         affected,
         repo=repo,
+        cache_key=cache_key,
     )
     # Filter out files that no longer exist.
     return [d for d in deps if (repo / d).is_file()][:_MAX_DEPENDENT_FILES]
@@ -66,9 +74,14 @@ def enrich_context(
     ctx,
     db: CacheDB,
 ) -> None:
-    """Populate dependent_files and file_sources on the ReviewContext in-place."""
+    """Populate dependent_files and file_sources on the ReviewContext in-place.
+
+    Uses ``ctx.cache_repo_path`` (when set) as the cache key so non-HEAD
+    reviews on temporary worktrees still hit the shared cache.
+    """
     ctx.dependent_files = fetch_dependent_files(
         ctx.repo_path, ctx.git_hash, db, ctx.changed_files,
+        cache_repo_path=ctx.cache_repo_path,
     )
     ctx.file_sources = load_dependent_sources(ctx.repo_path, ctx.dependent_files)
     # Also include full source for changed files.

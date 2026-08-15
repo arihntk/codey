@@ -128,33 +128,40 @@ def index_repository(
     db: CacheDB,
     *,
     force: bool = False,
+    cache_repo_path: Path | str | None = None,
 ) -> IndexResult:
     """Index a repository, reusing cached entries for unchanged files.
 
     Args:
-        repo_path: Absolute path to the repo root.
+        repo_path: Absolute path to the repo root (used for file reads).
         db: Open CacheDB instance.
         force: If True, re-parse all files even if hash is unchanged.
+        cache_repo_path: Canonical repo path used as the cache key. When the
+            repo being indexed lives in a temporary worktree (non-HEAD
+            reviews), pass the real repo here so cache entries are keyed
+            canonically and reused across runs instead of accumulating rows
+            for deleted tmpdir paths.
 
     Returns:
         IndexResult with counts and changed file list.
     """
     repo = Path(repo_path).resolve()
+    cache_key = str(Path(cache_repo_path or repo).resolve())
     head_hash = git_head_hash(repo) or "no-git"
     result = IndexResult(git_hash=head_hash)
 
-    if not force and db.has_indexed_hash(str(repo), head_hash):
-        existing = db.list_file_rel_paths(str(repo), head_hash)
+    if not force and db.has_indexed_hash(cache_key, head_hash):
+        existing = db.list_file_rel_paths(cache_key, head_hash)
         result.total_files = len(existing)
         result.reused_files = len(existing)
         return result
 
-    last_hash = db.last_indexed_hash(str(repo)) if not force else None
+    last_hash = db.last_indexed_hash(cache_key) if not force else None
     last_hashes: dict[str, str] = {}
     if last_hash:
-        last_hashes = db.file_entry_hashes(str(repo), last_hash)
+        last_hashes = db.file_entry_hashes(cache_key, last_hash)
 
-    db.upsert_index_run(str(repo), head_hash, file_count=0)
+    db.upsert_index_run(cache_key, head_hash, file_count=0)
 
     files = list_repo_files(repo)
     all_symbols: list[SymbolRecord] = []
@@ -174,17 +181,17 @@ def index_repository(
         chash = _content_hash(content)
         result.total_files += 1
 
-        if not force and last_hashes.get(rel) == chash and db.get_file_entry(str(repo), last_hash, rel):
+        if not force and last_hashes.get(rel) == chash and db.get_file_entry(cache_key, last_hash, rel):
             result.reused_files += 1
             # Reuse the file entry AND symbols under the new hash, otherwise
             # file_entry_hashes(new_hash) never contains this file and it gets
             # re-parsed on every subsequent commit (cache thrash).
-            old_entry = db.get_file_entry(str(repo), last_hash, rel)
+            old_entry = db.get_file_entry(cache_key, last_hash, rel)
             assert old_entry is not None
-            db.upsert_file_entry(str(repo), head_hash, old_entry)
-            file_syms = db.symbols_in_file(str(repo), last_hash, rel)
+            db.upsert_file_entry(cache_key, head_hash, old_entry)
+            file_syms = db.symbols_in_file(cache_key, last_hash, rel)
             if file_syms:
-                db.bulk_upsert_symbols(str(repo), head_hash, file_syms)
+                db.bulk_upsert_symbols(cache_key, head_hash, file_syms)
                 all_symbols.extend(file_syms)
             continue
 
@@ -201,13 +208,13 @@ def index_repository(
             mtime=fpath.stat().st_mtime,
             byte_count=byte_count,
         )
-        db.upsert_file_entry(str(repo), head_hash, entry)
+        db.upsert_file_entry(cache_key, head_hash, entry)
         if symbols:
-            db.bulk_upsert_symbols(str(repo), head_hash, symbols)
+            db.bulk_upsert_symbols(cache_key, head_hash, symbols)
             all_symbols.extend(symbols)
         result.symbols_extracted += len(symbols)
 
-    db.upsert_index_run(str(repo), head_hash, file_count=result.total_files)
+    db.upsert_index_run(cache_key, head_hash, file_count=result.total_files)
     return result
 
 

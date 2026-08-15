@@ -172,17 +172,23 @@ def build_call_graph(
     db: CacheDB,
     *,
     python_files: list[Path] | None = None,
+    cache_repo_path: Path | str | None = None,
 ) -> CallGraphResult:
     """Build and store call + import edges for all Python files in the repo.
 
     No-ops (returns an empty result) when edges already exist for this
     (repo, git_hash) — jedi reference resolution is the slowest part of the
     pipeline and is pure re-work on cache hits.
+
+    ``cache_repo_path`` is the canonical repo used as the cache key when
+    ``repo_path`` is a temporary worktree (non-HEAD reviews) — pass the real
+    repo so edges are keyed canonically and reused.
     """
     repo = Path(repo_path).resolve()
+    cache_key = str(Path(cache_repo_path or repo).resolve())
     result = CallGraphResult()
 
-    if db.has_call_edges(str(repo), git_hash):
+    if db.has_call_edges(cache_key, git_hash):
         return result
 
     if python_files is None:
@@ -197,7 +203,7 @@ def build_call_graph(
             rel = str(fpath.relative_to(repo))
         except ValueError:
             continue
-        scoped = db.symbols_in_file(str(repo), git_hash, rel)
+        scoped = db.symbols_in_file(cache_key, git_hash, rel)
         call_edges = _extract_call_edges(fpath, rel, scoped, repo)
         import_edges = _extract_imports(fpath, rel)
         all_call_edges.extend(call_edges)
@@ -205,9 +211,9 @@ def build_call_graph(
         result.files_processed += 1
 
     if all_call_edges:
-        db.bulk_insert_call_edges(str(repo), git_hash, all_call_edges)
+        db.bulk_insert_call_edges(cache_key, git_hash, all_call_edges)
     if all_import_edges:
-        db.bulk_insert_import_edges(str(repo), git_hash, all_import_edges)
+        db.bulk_insert_import_edges(cache_key, git_hash, all_import_edges)
 
     result.call_edges = len(all_call_edges)
     result.import_edges = len(all_import_edges)
@@ -221,14 +227,19 @@ def reverse_dependencies(
     affected_paths: list[str],
     *,
     repo: Path | None = None,
+    cache_key: str | None = None,
 ) -> list[str]:
     """Return paths of files that depend on the affected paths (one-hop).
 
     A file B depends on file A if:
     - B imports a module that resolves to A, or
     - B calls a function/class defined in A.
+
+    ``cache_key`` is the canonical repo cache key when ``repo_path`` is a
+    temporary worktree (non-HEAD reviews).
     """
     repo = repo or Path(repo_path).resolve()
+    key = cache_key or str(repo)
     affected_set: set[Path] = set()
     for p in affected_paths:
         pp = Path(p)
@@ -254,10 +265,10 @@ def reverse_dependencies(
 
     dependents: set[str] = set()
     for mod in affected_modules:
-        for imp in db.importers_of_module(str(repo), git_hash, mod):
+        for imp in db.importers_of_module(key, git_hash, mod):
             if imp.rel_path not in normalised:
                 dependents.add(imp.rel_path)
-        for imp in db.all_imports_for_modules(str(repo), git_hash, {mod}):
+        for imp in db.all_imports_for_modules(key, git_hash, {mod}):
             if imp.rel_path not in normalised:
                 dependents.add(imp.rel_path)
 
@@ -270,11 +281,11 @@ def reverse_dependencies(
     affected_bare_names: set[str] = set()
     for ap in affected_set:
         rel = _rel(ap)
-        for s in db.symbols_in_file(str(repo), git_hash, rel):
+        for s in db.symbols_in_file(key, git_hash, rel):
             affected_by_qname[s.qualified_name] = rel
             affected_bare_names.add(s.name)
 
-    for edge in db.all_call_edges(str(repo), git_hash):
+    for edge in db.all_call_edges(key, git_hash):
         if edge.caller_path in normalised:
             continue
         if edge.callee_qname and edge.callee_qname in affected_by_qname:
