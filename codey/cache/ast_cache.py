@@ -8,19 +8,16 @@ absolute repo path so a single global DB can serve multiple repositories.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 
 __all__ = [
     "CacheDB",
     "FileEntry",
-    "cached_db_path",
     "default_db_path",
 ]
 
@@ -31,19 +28,13 @@ def default_db_path() -> Path:
     return DEFAULT_DB_PATH
 
 
-def cached_db_path() -> str:
-    return str(DEFAULT_DB_PATH)
-
-
 @dataclass
 class FileEntry:
-    """A stored file's AST metadata."""
+    """A stored file's index metadata (content hash, symbols are in the symbols table)."""
 
     rel_path: str
     language: str
     content_hash: str
-    ast_json: str
-    symbols_json: str
     mtime: float
     byte_count: int
 
@@ -143,7 +134,16 @@ class CacheDB:
     def _migrate(self) -> None:
         schema = resources.files("codey.cache").joinpath("schema.sql").read_text("utf-8")
         self._conn.executescript(schema)
+        self._drop_legacy_columns()
         self._commit()
+
+    def _drop_legacy_columns(self) -> None:
+        """Drop the write-only ast_json/symbols_json columns from databases
+        created before they were removed (SQLite 3.35+ supports DROP COLUMN)."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(file_entries)")}
+        for legacy in ("ast_json", "symbols_json"):
+            if legacy in cols:
+                self._conn.execute(f"ALTER TABLE file_entries DROP COLUMN {legacy}")
 
     # --- index runs ----
 
@@ -201,13 +201,11 @@ class CacheDB:
         self._execute(
             """INSERT INTO file_entries
                  (repo_path, git_hash, rel_path, language, content_hash,
-                  ast_json, symbols_json, mtime, byte_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  mtime, byte_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (repo_path, git_hash, rel_path) DO UPDATE SET
                  language=excluded.language,
                  content_hash=excluded.content_hash,
-                 ast_json=excluded.ast_json,
-                 symbols_json=excluded.symbols_json,
                  mtime=excluded.mtime,
                  byte_count=excluded.byte_count""",
             (
@@ -216,8 +214,6 @@ class CacheDB:
                 entry.rel_path,
                 entry.language,
                 entry.content_hash,
-                entry.ast_json,
-                entry.symbols_json,
                 entry.mtime,
                 entry.byte_count,
             ),
@@ -231,8 +227,7 @@ class CacheDB:
         rel_path: str,
     ) -> FileEntry | None:
         row = self._query_one(
-            """SELECT rel_path, language, content_hash, ast_json, symbols_json,
-                      mtime, byte_count
+            """SELECT rel_path, language, content_hash, mtime, byte_count
                FROM file_entries
                WHERE repo_path=? AND git_hash=? AND rel_path=?""",
             (repo_path, git_hash, rel_path),
@@ -243,8 +238,6 @@ class CacheDB:
             rel_path=row["rel_path"],
             language=row["language"],
             content_hash=row["content_hash"],
-            ast_json=row["ast_json"],
-            symbols_json=row["symbols_json"],
             mtime=row["mtime"],
             byte_count=row["byte_count"],
         )
@@ -255,8 +248,7 @@ class CacheDB:
         git_hash: str,
     ) -> Iterable[FileEntry]:
         for row in self._query(
-            """SELECT rel_path, language, content_hash, ast_json, symbols_json,
-                      mtime, byte_count
+            """SELECT rel_path, language, content_hash, mtime, byte_count
                FROM file_entries
                WHERE repo_path=? AND git_hash=?""",
             (repo_path, git_hash),
@@ -265,8 +257,6 @@ class CacheDB:
                 rel_path=row["rel_path"],
                 language=row["language"],
                 content_hash=row["content_hash"],
-                ast_json=row["ast_json"],
-                symbols_json=row["symbols_json"],
                 mtime=row["mtime"],
                 byte_count=row["byte_count"],
             )
@@ -489,16 +479,3 @@ class CacheDB:
         self._execute("DELETE FROM index_runs WHERE repo_path=? AND git_hash=?",
                            (repo_path, git_hash))
         self._commit()
-
-
-@lru_cache(maxsize=1)
-def hash_content(content: str) -> str:
-    import hashlib
-
-    return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
-
-
-def to_symbols_json(symbols: Sequence[SymbolRecord]) -> str:
-    return json.dumps(
-        [{"name": s.name, "qn": s.qualified_name, "k": s.kind, "ls": s.line_start, "le": s.line_end} for s in symbols],
-    )

@@ -21,7 +21,7 @@ from tree_sitter_language_pack import get_parser
 
 from codey.cache.ast_cache import CacheDB, FileEntry, SymbolRecord
 from codey.index.languages import detect_language
-from codey.index.symbols import extract_symbols, serialize_ast
+from codey.index.symbols import extract_symbols
 from codey.process import allowlist_env
 
 __all__ = ["IndexResult", "index_repository", "git_head_hash", "list_repo_files"]
@@ -116,22 +116,16 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
 
-def _parse_file(path: Path, language: str) -> tuple[str, str, list[SymbolRecord], int]:
-    """Parse a single file, returning (ast_json, symbols_json, symbols, byte_count)."""
+def _parse_file(path: Path, language: str) -> tuple[list[SymbolRecord], int]:
+    """Parse a single file, returning (symbols, byte_count)."""
     raw = path.read_bytes()
     try:
         parser = get_parser(language)
         tree = parser.parse(raw)
     except Exception:
-        return "{}", "[]", [], len(raw)
+        return [], len(raw)
     symbols = extract_symbols(tree, str(path.name), language)
-    ast_json = serialize_ast(tree)
-    import json
-    symbols_json = json.dumps(
-        [{"n": s.name, "q": s.qualified_name, "k": s.kind, "ls": s.line_start, "le": s.line_end} for s in symbols],
-        separators=(",", ":"),
-    )
-    return ast_json, symbols_json, symbols, len(raw)
+    return symbols, len(raw)
 
 
 def index_repository(
@@ -214,13 +208,11 @@ def index_repository(
         result.parsed_files += 1
         result.changed_files.append(rel)
 
-        ast_json, symbols_json, symbols, byte_count = _parse_file(fpath, language)
+        symbols, byte_count = _parse_file(fpath, language)
         entry = FileEntry(
             rel_path=rel,
             language=language,
             content_hash=chash,
-            ast_json=ast_json,
-            symbols_json=symbols_json,
             mtime=fpath.stat().st_mtime,
             byte_count=byte_count,
         )

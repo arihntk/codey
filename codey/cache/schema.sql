@@ -15,8 +15,6 @@ CREATE TABLE IF NOT EXISTS index_runs (
 );
 
 -- One row per parsed file in a given index run.
--- ast_json stores the tree-sitter AST as serialized node metadata.
--- symbols_json stores extracted symbol ids (functions, classes, etc.).
 CREATE TABLE IF NOT EXISTS file_entries (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_path       TEXT    NOT NULL,
@@ -24,8 +22,6 @@ CREATE TABLE IF NOT EXISTS file_entries (
     rel_path        TEXT    NOT NULL,
     language        TEXT    NOT NULL,
     content_hash    TEXT    NOT NULL,
-    ast_json        TEXT    NOT NULL,
-    symbols_json   TEXT    NOT NULL DEFAULT '[]',
     mtime           REAL    NOT NULL DEFAULT 0,
     byte_count      INTEGER NOT NULL DEFAULT 0,
     UNIQUE (repo_path, git_hash, rel_path),

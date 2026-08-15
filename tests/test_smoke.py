@@ -133,7 +133,6 @@ class TestCacheDB:
             FileEntry,
             ImportEdge,
             SymbolRecord,
-            hash_content,
         )
 
         db = CacheDB()
@@ -141,7 +140,7 @@ class TestCacheDB:
         assert db.has_indexed_hash("/repo", "abc123")
         assert db.last_indexed_hash("/repo") == "abc123"
 
-        entry = FileEntry("foo.py", "python", hash_content("x"), "{}", "[]", 0.0, 1)
+        entry = FileEntry("foo.py", "python", "abc123", 0.0, 1)
         db.upsert_file_entry("/repo", "abc123", entry)
         got = db.get_file_entry("/repo", "abc123", "foo.py")
         assert got and got.rel_path == "foo.py"

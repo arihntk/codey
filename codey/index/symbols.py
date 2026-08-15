@@ -7,12 +7,11 @@ augmented by the jedi call-graph builder (see ``callgraph.py``).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 
 from codey.cache.ast_cache import SymbolRecord
 
-__all__ = ["extract_symbols", "serialize_ast", "SymbolExtractor"]
+__all__ = ["extract_symbols", "SymbolExtractor"]
 
 
 @dataclass
@@ -125,30 +124,3 @@ def extract_symbols(tree, rel_path: str, language: str) -> list[SymbolRecord]:
         )
         for r in raw
     ]
-
-
-def serialize_ast(tree, *, max_nodes: int = 5000) -> str:
-    """Serialize a tree-sitter AST to compact JSON for caching.
-
-    Stores node type + line ranges for the first ``max_nodes`` nodes to keep
-    the representation bounded.  The full AST can always be re-parsed from
-    source if needed; this is a compact summary for cache hit/miss decisions.
-    """
-    import json
-
-    nodes: list[dict[str, object]] = []
-
-    def visit(node) -> Iterator[None]:
-        if len(nodes) >= max_nodes:
-            return
-        nodes.append({
-            "t": node.type,
-            "s": [node.start_point[0], node.start_point[1]],
-            "e": [node.end_point[0], node.end_point[1]],
-        })
-        for child in node.children:
-            yield from visit(child)
-
-    for _ in visit(tree.root_node):
-        pass
-    return json.dumps(nodes, separators=(",", ":"))
