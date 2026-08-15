@@ -100,8 +100,12 @@ def run_code_quality_agent(
             confidence=0.7,
         ))
 
-    # Attach verbatim diff evidence to any LLM findings that lack it.
+    # Attach verbatim diff evidence to any LLM findings that lack it, then
+    # ENFORCE the verbatim rule: LLM findings that still have no evidence are
+    # discarded (the system prompt promises this). The synthetic INFO finding
+    # (if any) always has evidence attached above.
     attach_evidence(findings, ctx)
+    findings = [f for f in findings if f.evidence.strip()]
 
     finding_details = "; ".join(
         f"{f.title} [{f.severity.value}]"

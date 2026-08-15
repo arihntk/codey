@@ -167,10 +167,12 @@ def run_security_agent(
     # Merge: LLM findings first (broader confidentiality judgement), then
     # tool findings, then hardcoded-secret findings — dropping any LLM/tool
     # finding whose title collides with a hardcoded finding.
+    llm_kept: list[Finding] = []
     findings: list[Finding] = []
     for f in llm_findings:
         if f.title in hardcoded_titles:
             continue
+        llm_kept.append(f)
         findings.append(f)
     for f in tool_findings:
         if f.title in hardcoded_titles:
@@ -194,8 +196,18 @@ def run_security_agent(
             confidence=0.8,
         ))
 
-    # Attach verbatim diff evidence to any LLM findings that lack it.
+    # Attach verbatim diff evidence to any LLM findings that lack it, then
+    # ENFORCE the verbatim rule for LLM-derived findings: those that still
+    # have no evidence are discarded (the system prompt promises this).
     attach_evidence(findings, ctx)
+    if llm_kept:
+        llm_kept_with_evidence = [f for f in llm_kept if f.evidence.strip()]
+        llm_titles = {f.title for f in llm_kept}
+        llm_kept_titles = {f.title for f in llm_kept_with_evidence}
+        findings = [
+            f for f in findings
+            if f.title not in llm_titles or f.title in llm_kept_titles
+        ]
 
     tools_used = [k for k in raw_results] or ["no external security tools"]
     finding_details = "; ".join(

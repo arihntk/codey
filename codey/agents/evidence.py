@@ -1,9 +1,13 @@
 """Utilities for attaching concrete code evidence to agent findings.
 
 LLMs sometimes omit or hallucinate evidence.  These helpers extract
-verbatim code snippets from the diff or full file source so every
-finding is grounded in actual repository content — proving the agent
-did not hallucinate.
+verbatim code snippets from the diff or full file source so every finding
+is grounded in actual repository content — proving the agent did not
+hallucinate.
+
+Evidence is only attached when the finding's reported location actually
+matches a diff chunk / source line. A hallucinated path or line number
+NEVER gets plausible-looking but wrong evidence bolted on.
 """
 
 from __future__ import annotations
@@ -21,6 +25,10 @@ def attach_evidence(findings: list[Finding], ctx: ReviewContext) -> None:
     ``evidence`` string, locate the enclosing diff chunk and copy a relevant
     snippet of the diff text as evidence.  If no chunk matches, try a
     window of lines from the full file source.
+
+    Evidence is attached ONLY when the finding's file/line matches real
+    content — findings pointing at files or lines that don't exist are left
+    with empty evidence so they can be discarded downstream.
     """
     if not findings:
         return
@@ -49,7 +57,12 @@ def _extract_from_chunks(
     f: Finding,
     chunks_by_file: dict[str, list[DiffChunk]],
 ) -> str | None:
-    """Find the diff chunk enclosing the finding's line and return its text."""
+    """Find the diff chunk enclosing the finding's line and return its text.
+
+    Only a chunk that actually contains ``line_start`` (or a finding with no
+    line info at all) yields evidence. Chunks merely in the same file do NOT
+    qualify — attaching them would let a hallucinated line claim real code.
+    """
     chunks = chunks_by_file.get(f.file_path)
     if not chunks:
         return None
@@ -58,21 +71,23 @@ def _extract_from_chunks(
             return chunk.diff_text[:1000]
         if chunk.line_start <= f.line_start <= chunk.line_end:
             return _window(chunk.diff_text, f.line_start, chunk.line_start)
-    # No exact match — return the first chunk for that file.
-    return chunks[0].diff_text[:800]
+    return None
 
 
 def _extract_from_source(
     f: Finding,
     file_sources: dict[str, str],
 ) -> str | None:
-    """Extract a code window from the full file source."""
+    """Extract a code window from the full file source, only when the
+    finding's line actually exists in that file."""
     source = file_sources.get(f.file_path)
     if not source:
         return None
+    lines = source.splitlines()
     if f.line_start is None:
         return source[:600]
-    lines = source.splitlines()
+    if f.line_start < 1 or f.line_start > len(lines):
+        return None
     start = max(0, (f.line_start or 1) - 3)
     end = min(len(lines), (f.line_end or f.line_start or 1) + 3)
     window = lines[start:end]
