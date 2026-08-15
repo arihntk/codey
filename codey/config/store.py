@@ -57,6 +57,7 @@ class Config:
     model: str = ""
     summarizer_model: str = ""
     base_url: str | None = None
+    append_summary_to_commit: bool | None = None
 
     def is_complete(self) -> bool:
         return bool(self.provider) and bool(self.model)
@@ -71,6 +72,7 @@ class Config:
             model=d.get("model", ""),
             summarizer_model=d.get("summarizer_model", ""),
             base_url=d.get("base_url"),
+            append_summary_to_commit=d.get("append_summary_to_commit"),
         )
 
 

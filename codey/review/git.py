@@ -6,7 +6,16 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["CommitInfo", "resolve_commit", "get_latest_commit", "get_commit_diff", "get_changed_files"]
+__all__ = [
+    "CommitInfo",
+    "resolve_commit",
+    "get_latest_commit",
+    "get_commit_diff",
+    "get_changed_files",
+    "get_commit_full_message",
+    "amend_commit_message",
+    "has_staged_changes",
+]
 
 
 @dataclass
@@ -26,6 +35,18 @@ def _git(args: list[str], repo: Path) -> str:
         check=False,
     )
     return proc.stdout if proc.returncode == 0 else ""
+
+
+def _git_proc(args: list[str], repo: Path, *, input_text: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git"] + args,
+        cwd=str(repo),
+        input=input_text,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
 
 
 def resolve_commit(repo: Path, ref: str) -> str | None:
@@ -101,3 +122,36 @@ def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
         result[current_file] = "".join(current_hunk)
 
     return result
+
+
+def get_commit_full_message(repo: Path, *, commit: str = "HEAD") -> str:
+    """Return the full commit message (subject + body) for the given commit."""
+    return _git(["log", "-1", "--pretty=%B", commit], repo)
+
+
+def has_staged_changes(repo: Path) -> bool:
+    """True when there are changes staged in the index (vs HEAD)."""
+    proc = _git_proc(["diff", "--cached", "--quiet"], repo)
+    return proc.returncode != 0
+
+
+def amend_commit_message(repo: Path, new_message: str) -> tuple[bool, str]:
+    """Amend HEAD's commit message to ``new_message``.
+
+    Refuses to amend when there are staged changes (so the commit tree is not
+    altered unexpectedly). Returns ``(ok, message)`` where ``message`` is either
+    a short success note or the captured stderr on failure.
+    """
+    if has_staged_changes(repo):
+        return False, "staged changes present; refusing to amend commit message"
+
+    # No staged changes at this point (guarded above), so --amend only rewrites
+    # the message — the commit tree is preserved.
+    proc = _git_proc(
+        ["commit", "--amend", "-F", "-"],
+        repo,
+        input_text=new_message,
+    )
+    if proc.returncode != 0:
+        return False, (proc.stderr.strip() or "git commit --amend failed")
+    return True, "amended"
