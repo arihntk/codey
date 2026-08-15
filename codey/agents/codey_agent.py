@@ -87,6 +87,7 @@ def run_codey_agent(
         total_findings=len(all_findings),
         recommendation=rec,
         errors=errors,
+        pruned_chunks=list(ctx.pruned_chunks),
     )
     return review
 
@@ -104,6 +105,13 @@ def _build_text_summary(
     lines.append(f"**Commit:** {ctx.commit_message[:200]}")
     lines.append(f"**Verdict:** {rec.replace('_', ' ').title()} ({overall.value})")
     lines.append(f"**Findings:** {sum(len(r.findings) for r in reports.values())} across {len(reports)} agent reports")
+    if ctx.pruned_chunks:
+        lines.append(
+            f"**Coverage:** {len(ctx.pruned_chunks)} diff chunk(s) were pruned "
+            f"to stay within the context budget: "
+            f"{', '.join(ctx.pruned_chunks[:10])}"
+            + (" …" if len(ctx.pruned_chunks) > 10 else "")
+        )
     lines.append("")
     for name in ("index", "security", "code_quality", "test"):
         report = reports.get(name)

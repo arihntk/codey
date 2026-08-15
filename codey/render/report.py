@@ -69,6 +69,18 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
     if review.errors:
         header.add_row("Errors:", Text(f"{len(review.errors)} agent error(s)", style="red"))
 
+    # Coverage note when context-budget pruning dropped chunks.
+    pruned = review.pruned_chunks
+    if pruned:
+        header.add_row(
+            "Pruned:",
+            Text(
+                f"{len(pruned)} diff chunk(s) omitted for context budget "
+                f"({', '.join(pruned[:5])}{' …' if len(pruned) > 5 else ''})",
+                style="yellow",
+            ),
+        )
+
     console.print(Panel(header, title="[bold]Codey Review[/]", border_style="blue", padding=(1, 2)))
 
     # Surface structured errors prominently instead of hiding them.

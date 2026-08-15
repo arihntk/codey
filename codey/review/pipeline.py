@@ -156,25 +156,51 @@ def _summarise_if_needed(*, safeguard: bool, summarizer, diffs: dict[str, str], 
 def _prune_to_budget(ctx: ReviewContext) -> None:
     """Drop low-priority chunks if the total context exceeds the model budget.
 
-    Uses ``ctx.max_tokens`` as the budget (no hardcoded constant). Chunks are
-    kept largest-first and the rest discarded.
+    Uses ``ctx.max_tokens`` as the budget (no hardcoded constant). Selection:
+    the largest chunk of every file is guaranteed a seat (so no file is
+    silently dropped wholesale), then remaining budget is filled largest-first.
+    Every dropped chunk is recorded on ``ctx.pruned_chunks`` so the user knows
+    coverage was truncated — never a silent omission.
     """
     max_tokens = ctx.max_tokens
     if not ctx.diff_chunks:
         return
     total = sum(len(c.diff_text) // 4 for c in ctx.diff_chunks)
     if total <= max_tokens:
+        ctx.pruned_chunks = []
         return
-    # Keep chunks with most content (assume highest signal), drop from the end.
-    sorted_chunks = sorted(ctx.diff_chunks, key=lambda c: len(c.diff_text), reverse=True)
-    kept_budget = 0
+
+    # Pass 1: keep the largest chunk of each file (fairness — every changed
+    # file keeps at least a slice under review).
     kept: list = []
-    for chunk in sorted_chunks:
+    kept_budget = 0
+    largest_by_file: dict[str, object] = {}
+    for chunk in ctx.diff_chunks:
+        cur = largest_by_file.get(chunk.file_path)
+        if cur is None or len(chunk.diff_text) > len(cur.diff_text):
+            largest_by_file[chunk.file_path] = chunk
+    for chunk in largest_by_file.values():
+        cost = len(chunk.diff_text) // 4
+        if kept_budget + cost <= max_tokens:
+            kept.append(chunk)
+            kept_budget += cost
+
+    # Pass 2: fill remaining budget largest-first.
+    remaining = [c for c in ctx.diff_chunks if c not in kept]
+    remaining.sort(key=lambda c: len(c.diff_text), reverse=True)
+    for chunk in remaining:
         cost = len(chunk.diff_text) // 4
         if kept_budget + cost > max_tokens:
-            break
+            continue
         kept.append(chunk)
         kept_budget += cost
+
+    kept_names = {id(c) for c in kept}
+    ctx.pruned_chunks = [
+        f"{c.file_path}:{c.line_start}-{c.line_end}"
+        for c in ctx.diff_chunks
+        if id(c) not in kept_names
+    ]
     # Re-sort by file path + line for readability.
     kept.sort(key=lambda c: (c.file_path, c.line_start))
     ctx.diff_chunks = kept

@@ -102,6 +102,11 @@ class ReviewSummary(BaseModel):
         description="Structured errors encountered during the review (agent LLM "
         "failures, unparseable output, pipeline issues). Never silently dropped.",
     )
+    pruned_chunks: list[str] = Field(
+        default_factory=list,
+        description="Diff chunk ranges omitted by context-budget pruning, e.g. "
+        "'path:10-25'. Empty when nothing was pruned.",
+    )
 
     def all_findings(self) -> list[Finding]:
         out: list[Finding] = []

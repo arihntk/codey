@@ -39,3 +39,8 @@ class ReviewContext:
     file_sources: dict[str, str] = field(default_factory=dict)  # path -> full source
     index_summary: str = ""  # architecture/design summary from indexer
     max_tokens: int = 100_000  # context window budget
+    pruned_chunks: list[str] = field(
+        default_factory=list,
+        # Chunk ranges dropped by context-budget pruning, e.g. 'path:10-25'.
+        # Empty when nothing was dropped.
+    )
