@@ -34,15 +34,6 @@ SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".cs": "c_sharp",
 }
 
-# Languages for which we have symbol extractors.
-SYMBOL_EXTRACTION_LANGUAGES: frozenset[str] = frozenset({"python"})
-
-_TREE_SITTER_NODE_FIELDS = {
-    "python": {"function": "function_definition", "class": "class_definition"},
-    "javascript": {"function": "function_declaration", "class": "class_declaration"},
-    "typescript": {"function": "function_declaration", "class": "class_declaration"},
-}
-
 
 def detect_language(path: Path) -> str | None:
     """Return tree-sitter language name for a file, or None if unsupported."""

@@ -11,14 +11,10 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import keyring
 
 from codey.config.providers import ProviderPreset, get_preset
-
-if TYPE_CHECKING:
-    pass
 
 __all__ = [
     "Config",
@@ -30,7 +26,6 @@ __all__ = [
     "delete_api_key",
     "is_provider_configured",
     "resolve_provider",
-    "active_or_prompt_provider",
 ]
 
 # --- Paths ---------------------------------------------------------------
@@ -181,11 +176,3 @@ def resolve_provider(cfg: Config) -> tuple[ProviderPreset, str, str | None]:
     if preset.requires_base_url and not base_url:
         raise ConfigError(f"Base URL required for {preset.label}. Run `codey set`.")
     return preset, api_key, base_url
-
-
-def active_or_prompt_provider() -> str:
-    """Return the active provider key or raise, telling the user to run `codey set`."""
-    cfg = load_config()
-    if not cfg.is_complete():
-        raise ConfigError("No provider configured. Run `codey set` first.")
-    return cfg.provider
