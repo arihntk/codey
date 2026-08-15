@@ -22,6 +22,7 @@ from tree_sitter_language_pack import get_parser
 from codey.cache.ast_cache import CacheDB, FileEntry, SymbolRecord
 from codey.index.languages import detect_language
 from codey.index.symbols import extract_symbols, serialize_ast
+from codey.process import allowlist_env
 
 __all__ = ["IndexResult", "index_repository", "git_head_hash", "list_repo_files"]
 
@@ -49,7 +50,11 @@ class IndexResult:
 
 
 def git_head_hash(repo_path: Path | str) -> str | None:
-    """Return the current HEAD commit hash, or None if not a git repo."""
+    """Return the current HEAD commit hash, or None if not a git repo.
+
+    Runs with an allowlisted env: git may execute repo-supplied config hooks
+    (core.fsmonitor, pager, filters) that must never see credentials.
+    """
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -58,6 +63,7 @@ def git_head_hash(repo_path: Path | str) -> str | None:
             text=True,
             timeout=10,
             check=False,
+            env=allowlist_env(),
         )
         if proc.returncode == 0:
             return proc.stdout.strip()
@@ -67,7 +73,11 @@ def git_head_hash(repo_path: Path | str) -> str | None:
 
 
 def list_repo_files(repo_path: Path) -> list[Path]:
-    """List all source files in the repo, respecting .gitignore via git ls-files."""
+    """List all source files in the repo, respecting .gitignore via git ls-files.
+
+    Allowlisted env: git config (core.fsmonitor etc.) can run repo-supplied
+    commands during ls-files.
+    """
     try:
         proc = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -76,6 +86,7 @@ def list_repo_files(repo_path: Path) -> list[Path]:
             text=False,
             timeout=30,
             check=False,
+            env=allowlist_env(),
         )
         if proc.returncode == 0:
             files = [

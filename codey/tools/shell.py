@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from codey.process import scrubbed_env
+from codey.process import allowlist_env, scrubbed_env
 
 __all__ = [
     "ShellResult",
@@ -67,8 +67,9 @@ def _validate_repo(repo: RepoPath) -> Path:
     return p
 
 
-def _run(args: list[str], *, cwd: Path, timeout: int = 30) -> ShellResult:
+def _run(args: list[str], *, cwd: Path, timeout: int = 30, allowlist: bool = False) -> ShellResult:
     try:
+        env = allowlist_env() if allowlist else scrubbed_env()
         proc = subprocess.run(
             args,
             cwd=str(cwd),
@@ -76,7 +77,7 @@ def _run(args: list[str], *, cwd: Path, timeout: int = 30) -> ShellResult:
             text=True,
             timeout=timeout,
             check=False,
-            env=scrubbed_env(),
+            env=env,
         )
         stdout = proc.stdout[:_MAX_OUTPUT]
         if len(proc.stdout) > _MAX_OUTPUT:
@@ -189,7 +190,8 @@ def run_git(args: list[str], repo: RepoPath = ".") -> ShellResult:
             returncode=-1,
         )
     full_args = ["git"] + args
-    return _run(full_args, cwd=repo_path).truncate()
+    # git may execute repo-supplied config hooks (fsmonitor etc.) — allowlist.
+    return _run(full_args, cwd=repo_path, allowlist=True).truncate()
 
 
 # --- LangGraph tool adapters --------------------------------------------
