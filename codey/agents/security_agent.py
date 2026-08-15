@@ -33,7 +33,7 @@ from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.agents.secrets import detect_hardcoded_secrets
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
-from codey.process import scrubbed_env
+from codey.process import allowlist_env, scrubbed_env
 
 __all__ = ["run_security_agent"]
 
@@ -381,18 +381,19 @@ def _run_gitleaks(repo: Path, *, commit: str = "HEAD") -> str | None:
     try:
         # Scan only the commit under review (diff vs its parent), not the
         # entire working tree — pre-existing secrets in unrelated files must
-        # not be attributed to this review. Falls back to a plain tree scan
-        # if log-opts isn't supported by the installed gitleaks.
-        log_opts = f"{commit}~1..{commit}"
-        if commit == "HEAD":
-            import subprocess as _sp
+        # not be attributed to this review. Root commits (no parent) fall
+        # back to scanning just that commit.
+        import subprocess as _sp
 
-            head = _sp.run(
-                ["git", "rev-parse", "--verify", "--quiet", "HEAD~1"],
-                cwd=str(repo), capture_output=True, text=True, timeout=15, check=False,
-            )
-            if head.returncode != 0:
-                log_opts = commit  # initial commit has no parent
+        parent_check = _sp.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{commit}~1"],
+            cwd=str(repo), capture_output=True, text=True, timeout=15, check=False,
+            env=allowlist_env(),
+        )
+        if parent_check.returncode == 0:
+            log_opts = f"{commit}~1..{commit}"
+        else:
+            log_opts = commit  # root commit: scan the commit itself
         proc = subprocess.run(
             ["gitleaks", "detect", "--source", str(repo),
              "--log-opts", log_opts,

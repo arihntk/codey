@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,7 +107,9 @@ def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
     Keys are the *new* file path (the ``b/`` side). Files that are deleted,
     renamed without content changes, or changed as binary produce no
     ``+++ b/`` line — the file name is taken from the ``diff --git`` header
-    instead so those changes are never silently invisible.
+    instead so those changes are never silently invisible. Paths may contain
+    spaces (git does not quote them) and may be C-style quoted when they
+    contain special characters — both forms are parsed.
     """
     result: dict[str, str] = {}
     if not raw_diff.strip():
@@ -122,14 +125,7 @@ def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
     for line in lines:
         if line.startswith("diff --git "):
             _flush()
-            # diff --git a/<old> b/<new>
-            rest = line[len("diff --git "):]
-            parts = rest.split()
-            new_path = parts[1][2:] if len(parts) > 1 else ""
-            if new_path == "/dev/null":
-                # Deletion: the diff belongs to the removed file.
-                new_path = parts[0][2:] if parts else ""
-            current_file = new_path
+            current_file = _header_new_path(line)
             current_hunk = [line]
         elif line.startswith("+++ "):
             # +++ b/<path> or +++ /dev/null — normalize to b/ side.
@@ -146,6 +142,25 @@ def _split_diff_by_file(raw_diff: str) -> dict[str, str]:
 
     _flush()
     return result
+
+
+def _header_new_path(header_line: str) -> str:
+    """Extract the b/ (new) path from a ``diff --git a/<old> b/<new>`` line.
+
+    Handles paths with spaces (unquoted) and git's C-style quoting of paths
+    with special characters (``"a/foo bar" "b/foo bar"``).
+    """
+    rest = header_line[len("diff --git "):].strip()
+    m = re.match(r'"?a/(.*?)"? b/(.*)$', rest)
+    if m:
+        new = m.group(2)
+        # Strip trailing quote (quoted form: "b/foo bar").
+        if new.endswith('"'):
+            new = new[:-1]
+        return new
+    # Fallback: last whitespace token (legacy behaviour for weird headers).
+    tokens = rest.split()
+    return tokens[-1][2:] if tokens and len(tokens[-1]) > 2 else ""
 
 
 def get_commit_full_message(repo: Path, *, commit: str = "HEAD") -> str:
