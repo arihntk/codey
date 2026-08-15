@@ -71,6 +71,49 @@ class TestConfigProviders:
         assert p.requires_api_key is False
         assert p.requires_base_url is True
 
+    def test_fetch_models_offline_returns_empty(self):
+        """Offline/unreachable providers must return [] so the CLI falls back
+        to the bundled list — never raise."""
+        import socket
+
+        socket.setdefaulttimeout(1)
+        from codey.config.models import fetch_available_models
+        from codey.config.providers import get_preset
+
+        models = fetch_available_models(get_preset("openai"), api_key="fake-key")
+        assert models == []
+
+    def test_fetch_models_local_endpoint(self):
+        """The local provider lists models from its OpenAI-compatible /models
+        endpoint."""
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                data = json.dumps({"data": [{"id": "llama3.2"}, {"id": "qwen2.5"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):  # silence
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), Handler)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            from codey.config.models import fetch_available_models
+            from codey.config.providers import get_preset
+
+            models = fetch_available_models(get_preset("local"), base_url=f"http://127.0.0.1:{port}/v1")
+            assert "qwen2.5" in models
+        finally:
+            srv.shutdown()
+
     def test_config_round_trip(self):
         from codey.config.store import Config, load_config, save_config
 

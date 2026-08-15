@@ -10,10 +10,15 @@ Codey orchestrates specialized agents — security, code quality, testing, and i
 
 ```
 codey set      # configure provider & API key (OpenAI / Anthropic / DeepSeek / Google / custom / local)
-codey model    # view or switch the active model
+codey model    # view or switch the active model (fetches the latest model list)
 codey config   # show current configuration
 codey review   # review the latest commit in the local repo
 ```
+
+The model pickers in `codey set` and `codey model` fetch the **live model
+list** from the provider's models API (OpenAI, Anthropic, Google, DeepSeek,
+and your local server's `/models` endpoint) instead of a hardcoded list. If
+the provider is unreachable, it falls back to the bundled list with a note.
 
 ## Providers
 

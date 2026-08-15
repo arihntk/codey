@@ -103,24 +103,32 @@ def set_config():
         if not api_key.strip() and preset.requires_api_key:
             api_key = Prompt.ask("Enter API key", console=console, password=True)
 
-    # Choose model.
+    # Choose model — prefer the live list from the provider's models API,
+    # falling back to the bundled presets when offline/unreachable.
+    from codey.config.models import fetch_available_models, model_fetch_help
+
+    console.print(f"[dim]Fetching available models ({model_fetch_help(preset)})…[/]")
+    live_models = fetch_available_models(preset, api_key=api_key, base_url=base_url)
+    candidates = live_models or preset.recommended_models
+    source_note = "" if live_models else " [dim](bundled list — provider API unreachable)[/]"
+
     model = ""
-    if preset.recommended_models:
+    if candidates:
         console.print()
-        console.print(f"Choose a model for [bold]{preset.label}[/]:")
-        for i, m in enumerate(preset.recommended_models, 1):
-            tag = "[green]default[/]" if m == preset.default_model else ""
-            console.print(f"  [cyan]{i}[/]. {m} {tag}")
-        console.print(f"  [cyan]{len(preset.recommended_models) + 1}[/]. [dim]Enter a custom model name[/]")
+        console.print(f"Choose a model for [bold]{preset.label}[/]:{source_note}")
+        for i, m in enumerate(candidates, 1):
+            tag = " [green]default[/]" if m == preset.default_model else ""
+            console.print(f"  [cyan]{i}[/]. {m}{tag}")
+        console.print(f"  [cyan]{len(candidates) + 1}[/]. [dim]Enter a custom model name[/]")
 
         model_choice = IntPrompt.ask(
             "Pick a model",
             default=1,
-            choices=[str(i) for i in range(1, len(preset.recommended_models) + 2)],
+            choices=[str(i) for i in range(1, len(candidates) + 2)],
             console=console,
         )
-        if model_choice <= len(preset.recommended_models):
-            model = preset.recommended_models[model_choice - 1]
+        if model_choice <= len(candidates):
+            model = candidates[model_choice - 1]
         else:
             model = Prompt.ask("Enter custom model name", console=console)
     else:
@@ -128,17 +136,17 @@ def set_config():
 
     # Choose summarizer model.
     summarizer_model = preset.summarizer_model or model
-    if preset.summarizer_model and preset.recommended_models:
+    if preset.summarizer_model and candidates:
         console.print()
         console.print(f"Choose a summarizer (cheap/fast) model for {preset.label}:")
-        candidates = [preset.summarizer_model] + [m for m in preset.recommended_models if m != preset.summarizer_model]
-        for i, m in enumerate(candidates, 1):
+        s_candidates = [preset.summarizer_model] + [m for m in candidates if m != preset.summarizer_model]
+        for i, m in enumerate(s_candidates, 1):
             console.print(f"  [cyan]{i}[/]. {m}")
-        console.print(f"  [cyan]{len(candidates) + 1}[/]. [dim]Use same as primary[/]")
+        console.print(f"  [cyan]{len(s_candidates) + 1}[/]. [dim]Use same as primary[/]")
         s_choice = IntPrompt.ask("Pick summarizer model", default=1,
-                                 choices=[str(i) for i in range(1, len(candidates) + 2)], console=console)
-        if s_choice <= len(candidates):
-            summarizer_model = candidates[s_choice - 1]
+                                 choices=[str(i) for i in range(1, len(s_candidates) + 2)], console=console)
+        if s_choice <= len(s_candidates):
+            summarizer_model = s_candidates[s_choice - 1]
         else:
             summarizer_model = model
 
@@ -294,17 +302,29 @@ def model_cmd():
 
 
 def _switch_model(cfg: Config, preset: ProviderPreset) -> None:
-    if preset.recommended_models:
-        for i, m in enumerate(preset.recommended_models, 1):
+    from codey.config.models import fetch_available_models
+
+    # Live model list when reachable; bundled list otherwise.
+    try:
+        from codey.config.store import resolve_provider
+
+        _, api_key, base_url = resolve_provider(cfg)
+    except Exception:
+        api_key, base_url = "", None
+    live = fetch_available_models(preset, api_key=api_key, base_url=base_url)
+    candidates = live or preset.recommended_models
+
+    if candidates:
+        for i, m in enumerate(candidates, 1):
             tag = "[green](current)[/]" if m == cfg.model else ""
             console.print(f"  [cyan]{i}[/]. {m} {tag}")
-        console.print(f"  [cyan]{len(preset.recommended_models) + 1}[/]. [dim]Enter custom[/]")
+        console.print(f"  [cyan]{len(candidates) + 1}[/]. [dim]Enter custom[/]")
         choice = IntPrompt.ask("Pick model",
                                default=1,
-                               choices=[str(i) for i in range(1, len(preset.recommended_models) + 2)],
+                               choices=[str(i) for i in range(1, len(candidates) + 2)],
                                console=console)
-        if choice <= len(preset.recommended_models):
-            cfg.model = preset.recommended_models[choice - 1]
+        if choice <= len(candidates):
+            cfg.model = candidates[choice - 1]
         else:
             cfg.model = Prompt.ask("Enter model name", console=console)
     else:
@@ -318,7 +338,17 @@ def _set_summarizer(cfg: Config, preset: ProviderPreset) -> None:
         return
     if not Confirm.ask("Set summarizer model?", default=False, console=console):
         return
-    candidates = [preset.summarizer_model] + [m for m in preset.recommended_models if m != preset.summarizer_model]
+    from codey.config.models import fetch_available_models
+
+    try:
+        from codey.config.store import resolve_provider
+
+        _, api_key, base_url = resolve_provider(cfg)
+    except Exception:
+        api_key, base_url = "", None
+    live = fetch_available_models(preset, api_key=api_key, base_url=base_url)
+    models = live or preset.recommended_models
+    candidates = [preset.summarizer_model] + [m for m in models if m != preset.summarizer_model]
     candidates.append(cfg.model)
     for i, m in enumerate(candidates, 1):
         console.print(f"  [cyan]{i}[/]. {m}")
