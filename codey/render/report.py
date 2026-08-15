@@ -87,19 +87,18 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
     agent_table.add_column("Status", style="white")
     agent_table.add_column("Findings", justify="right")
     agent_table.add_column("Tokens", justify="right", style="dim")
-    agent_table.add_column("Summary", style="dim", overflow="fold", max_width=80)
+    agent_table.add_column("Summary", style="dim", overflow="fold")
 
     for name in ("index", "security", "code_quality", "test"):
         report = review.agent_reports.get(name)
         if not report:
             continue
-        summary_display = report.summary[:300] + ("..." if len(report.summary) > 300 else "")
         agent_table.add_row(
             report.agent,
             report.status,
             str(report.finding_count()),
             str(report.token_usage),
-            summary_display,
+            report.summary,
         )
     console.print(agent_table)
 
