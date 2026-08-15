@@ -661,8 +661,17 @@ def review_cmd(
     ),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable live progress output."),
     force_index: bool = typer.Option(False, "--force-index", help="Force re-indexing of the repo."),
+    run_tests: bool = typer.Option(
+        False,
+        "--run-tests",
+        help=(
+            "Execute test commands detected in the repo (e.g. pytest, npm test). "
+            "Requires confirmation — this runs code from the repo under review."
+        ),
+    ),
 ):
-    """Review a commit (latest by default) in the local repo."""
+    """Review a commit (latest by default) in the local repo.
+    """
     from codey.cache.ast_cache import CacheDB
     from codey.llm.factory import build_llm, build_summarizer
     from codey.progress import ProgressEmitter, make_callback
@@ -670,6 +679,17 @@ def review_cmd(
     from codey.review.git import resolve_commit
     from codey.review.pipeline import run_pipeline
 
+    # Test execution is opt-in AND confirmed: it runs code from the repo
+    # being reviewed, so never do it implicitly.
+    if run_tests:
+        console.print(
+            "[yellow]Test execution is enabled.[/] This will run commands detected "
+            "in the repository (pytest, npm test, go test, etc.) — executing "
+            "code from the repo under review."
+        )
+        run_tests = Confirm.ask("Proceed with test execution?", default=False, console=console)
+        if not run_tests:
+            console.print("[dim]Skipping test execution; test agent will report skipped.[/]")
     # Validate config.
     try:
         cfg = load_config()
@@ -720,6 +740,7 @@ def review_cmd(
             summarizer_llm=summarizer_resolved.model,
             progress_callback=cb,
             commit=commit,
+            run_tests=run_tests,
         )
     except Exception as e:
         emitter.emit_error("pipeline", str(e))

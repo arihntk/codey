@@ -44,6 +44,7 @@ def run_pipeline(
     diff_override: dict[str, str] | None = None,
     changed_files_override: list[str] | None = None,
     commit: str = "HEAD",
+    run_tests: bool = False,
 ) -> Any:
     """Run the full review pipeline on the given commit.
 
@@ -56,6 +57,9 @@ def run_pipeline(
         diff_override: Override per-file diffs (skip git diff acquisition).
         changed_files_override: Override changed files list.
         commit: Commit ref to review (defaults to ``HEAD``, i.e. the latest commit).
+        run_tests: Allow the test agent to execute detected test commands.
+            Defaults to False — executing tests runs code from the repo
+            under review and requires explicit opt-in (``--run-tests``).
 
     Returns:
         PipelineResult wrapping the ReviewSummary and ReviewContext.
@@ -122,6 +126,7 @@ def run_pipeline(
         diff_chunks=chunk_list,
         full_diff=full_diff,
         db=db,
+        run_tests=run_tests,
     )
 
     # 7. Fetch dependent (affected-but-unmodified) files + source snippets.

@@ -101,7 +101,38 @@ def run_test_agent(
     db=None,
     llm: object | None = None,
 ) -> AgentReport:
-    """Identify and run tests for the changed code."""
+    """Identify and run tests for the changed code.
+
+    IMPORTANT: test commands are executed ONLY when ``ctx.run_tests`` is
+    True (set via ``codey review --run-tests`` after an explicit
+    confirmation). Running ``npm test`` / ``go test ./...`` on a repository
+    being reviewed executes code from that repository — reviewing untrusted
+    code must never trigger build/test script execution implicitly.
+    """
+
+    if not ctx.run_tests:
+        return AgentReport(
+            agent="test",
+            status="skipped",
+            summary=(
+                "Test execution disabled. Re-run with `codey review --run-tests` "
+                "(and confirm the prompt) to execute the detected test commands."
+            ),
+            findings=[
+                Finding(
+                    category=FindingCategory.TESTING,
+                    severity=Severity.INFO,
+                    title="Test execution skipped (opt-in)",
+                    description=(
+                        "Test commands are not executed by default because they "
+                        "run code from the repository under review. Enable with "
+                        "`codey review --run-tests` after confirming the command "
+                        "list is safe."
+                    ),
+                    confidence=1.0,
+                )
+            ],
+        )
 
     repo = ctx.repo_path
     frameworks = _detect_frameworks(repo)

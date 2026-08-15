@@ -365,6 +365,28 @@ class TestHardcodedSecrets:
 
         assert detect_hardcoded_secrets("") == []
 
+    def test_run_tests_opt_in(self, repo):
+        """The test agent must NOT execute commands unless ctx.run_tests is set."""
+        from codey.agents.context import ReviewContext
+        from codey.agents.test_agent import run_test_agent
+
+        ctx = ReviewContext(
+            repo_path=repo,
+            git_hash="HEAD",
+            commit_message="m",
+            changed_files=["main.py"],
+            full_diff="",
+        )
+        report = run_test_agent(ctx, llm=None)
+        assert report.status == "skipped"
+        assert "run-tests" in report.summary
+
+        ctx.run_tests = True
+        report2 = run_test_agent(ctx, llm=None)
+        # With tests enabled and pytest available, it either runs or reports
+        # "no test suite detected" — but must NOT be the disabled-skip message.
+        assert "Test execution disabled" not in report2.summary
+
     def test_shannon_entropy(self):
         from codey.agents.secrets import shannon_entropy
 
