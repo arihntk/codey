@@ -101,7 +101,8 @@ def _codey_node(state: ReviewState) -> dict[str, Any]:
             prior_errors=state.get("errors", []),
         )
     except Exception as e:
-        # Final fallback: never leave the caller with no review object.
+        # Final fallback: never leave the caller with no review object. The
+        # verdict must never optimistically approve a failed synthesis.
         review = ReviewSummary(
             overall_severity=Severity.INFO,
             summary=f"Review synthesis failed: {e}",
@@ -109,6 +110,7 @@ def _codey_node(state: ReviewState) -> dict[str, Any]:
             commit_message=ctx.commit_message,
             agent_reports=reports,
             total_findings=sum(len(r.findings) for r in reports.values()),
+            recommendation="request_changes",
             errors=[f"[codey] {e}"] + list(state.get("errors", [])),
         )
     return {
@@ -220,5 +222,10 @@ def run_review(
     review: ReviewSummary | None = result.get("final_review")
     if review is None:
         reports = result.get("agent_reports", {})
-        review = run_codey_agent(ctx, reports, primary_llm)
+        review = run_codey_agent(
+            ctx,
+            reports,
+            primary_llm,
+            prior_errors=result.get("errors") or [],
+        )
     return review
