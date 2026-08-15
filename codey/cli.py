@@ -147,8 +147,16 @@ def set_config():
 
     # Save API key to the OS keyring.
     if api_key.strip():
-        set_api_key(preset, api_key.strip())
-        console.print(f"[green]✓[/] API key stored in OS keyring for {preset.label}")
+        try:
+            set_api_key(preset, api_key.strip())
+            console.print(f"[green]✓[/] API key stored in OS keyring for {preset.label}")
+        except Exception as e:
+            # Headless/CI environments have no keyring backend — degrade
+            # gracefully instead of crashing the setup flow.
+            console.print(
+                f"[yellow]Could not store the API key in the OS keyring: {e}[/]\n"
+                f"[dim]Set the {preset.env_key_var} environment variable instead.[/]"
+            )
     else:
         console.print(f"[dim]Using {preset.label} API key from environment variable {preset.env_key_var}[/]")
 

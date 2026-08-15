@@ -8,6 +8,7 @@ same provider but a smaller/faster model tier.
 from __future__ import annotations
 
 import importlib
+import os
 from dataclasses import dataclass
 
 from codey.config.providers import ProviderPreset
@@ -61,10 +62,20 @@ def _instantiate(
         kwargs["base_url"] = base_url
 
     try:
-        return cls(**kwargs)
+        model = cls(**kwargs)
     except TypeError:
         kwargs.pop("max_retries", None)
-        return cls(**kwargs)
+        model = cls(**kwargs)
+
+    # Some providers (notably Google's ChatGoogleGenerativeAI) ignore an
+    # api_key kwarg and read their key from an environment variable. Setting
+    # it here is safe: every subprocess spawned by codey (bandit, semgrep,
+    # gitleaks, test commands, git) uses codey.process.scrubbed_env, which
+    # strips credential variables — the key can never leak into code running
+    # the repo under review.
+    if preset.key == "google":
+        os.environ[preset.env_key_var] = api_key
+    return model
 
 
 def build_llm(cfg: Config | None = None) -> ResolvedLLM:
@@ -110,4 +121,4 @@ def resolve_llms() -> tuple[ResolvedLLM, ResolvedLLM]:
 
 def estimate_tokens(text: str) -> int:
     """Rough token estimate (~4 chars/token). Used for context budgeting."""
-    return max(1, len(text) // 4)
+    return len(text) // 4

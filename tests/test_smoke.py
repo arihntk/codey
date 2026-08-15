@@ -246,7 +246,7 @@ class TestEstimateTokens:
     def test_basic(self):
         from codey.llm.factory import estimate_tokens
 
-        assert estimate_tokens("") == 1
+        assert estimate_tokens("") == 0
         assert estimate_tokens("hello world") == 2
         assert estimate_tokens("x" * 100) == 25
 
