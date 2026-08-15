@@ -1,10 +1,10 @@
-"""LangGraph review graph assembly — supervisor with parallel fan-out.
+"""LangGraph review graph assembly — DAG with parallel fan-out.
 
 Builds a StateGraph with:
   START -> index -> fan_out -> [security, code_quality, test] (parallel) -> codey -> END
 
 The index agent runs first (populating index_summary). Then security,
-code_quality, and test agents run in parallel (via Send). Finally the
+code_quality, and test agents run in parallel (edges from index). Finally the
 codey (orchestrator) agent collects all reports and synthesises the final
 ReviewSummary.
 """
@@ -77,7 +77,7 @@ def _codey_node(state: ReviewState) -> dict[str, Any]:
     ctx: ReviewContext = state["context"]
     primary_llm = state.get("primary_llm")
     reports: dict[str, AgentReport] = state.get("agent_reports", {})
-    review = run_codey_agent(ctx, reports, primary_llm, repo_for_subagents=ctx.repo_path)
+    review = run_codey_agent(ctx, reports, primary_llm)
     return {
         "final_review": review,
         "progress": ["codey: synthesis complete"],
@@ -137,5 +137,5 @@ def run_review(
     review: ReviewSummary | None = result.get("final_review")
     if review is None:
         reports = result.get("agent_reports", {})
-        review = run_codey_agent(ctx, reports, primary_llm, repo_for_subagents=ctx.repo_path)
+        review = run_codey_agent(ctx, reports, primary_llm)
     return review

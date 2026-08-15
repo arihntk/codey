@@ -1,12 +1,8 @@
-"""CodeyAgent (orchestrator/supervisor) — synthesises the final review.
+"""CodeyAgent (orchestrator) — synthesises the final review.
 
 After all worker agents have run in parallel, the orchestrator collects their
 AgentReports, asks the LLM to write an executive summary, picks the overall
 severity, and decides a recommendation (approve / request_changes / block).
-
-The orchestrator can also spawn retrieval subagents (via create_react_agent
-with grep/cat/callgraph tools) to gather more information if any agent's
-findings are ambiguous or incomplete.
 """
 
 from __future__ import annotations
@@ -24,9 +20,8 @@ from codey.agents.schemas import (
 )
 from codey.llm.response import extract_text
 from codey.llm.retry import invoke_with_retry
-from codey.tools.shell import build_tools_for_agents
 
-__all__ = ["run_codey_agent", "spawn_retrieval_subagent"]
+__all__ = ["run_codey_agent"]
 
 _SYNTHESIS_SYSTEM = (
     "You are Codey, the lead code reviewer. You have been given structured reports "
@@ -43,19 +38,11 @@ _SYNTHESIS_SYSTEM = (
     "instead provide an actionable executive assessment."
 )
 
-_RETRIEVAL_SYSTEM = (
-    "You are a retrieval subagent for the Codey review system. Use your tools "
-    "(grep, cat, ls, git) to investigate the repository and answer the orchestrator's "
-    "question. Be concise. If you can't find the answer, say so explicitly."
-)
-
 
 def run_codey_agent(
     ctx: ReviewContext,
     agent_reports: dict[str, AgentReport],
     primary_llm: object | None,
-    *,
-    repo_for_subagents=None,
 ) -> ReviewSummary:
     """Synthesise all agent reports into a final ReviewSummary."""
 
@@ -183,33 +170,3 @@ def _llm_synthesise(
             return text, len(raw) // 4
     except Exception:
         return "", 0
-
-
-def spawn_retrieval_subagent(
-    repo,
-    primary_llm: object,
-    question: str,
-) -> str:
-    """Spawn a react-agent with grep/cat/ls/git tools to answer a follow-up question.
-
-    Uses langgraph's create_react_agent pattern.
-    """
-    try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from langgraph.prebuilt import create_react_agent
-
-        tools = build_tools_for_agents(repo)
-        agent = create_react_agent(primary_llm, tools=tools)
-        result = agent.invoke({
-            "messages": [
-                SystemMessage(content=_RETRIEVAL_SYSTEM),
-                HumanMessage(content=question),
-            ],
-        })
-        messages = result.get("messages", [])
-        if messages:
-            last = messages[-1]
-            return extract_text(last)
-    except Exception as e:
-        return f"[retrieval subagent failed: {e}]"
-    return ""
