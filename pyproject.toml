@@ -1,6 +1,6 @@
 [project]
 name = "codey-review"
-version = "0.1.0"
+version = "0.2.0"
 description = "Production-grade multi-agent AI code review system"
 readme = "README.md"
 license = { text = "MIT" }
