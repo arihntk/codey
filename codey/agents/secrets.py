@@ -37,7 +37,9 @@ __all__ = ["detect_hardcoded_secrets", "shannon_entropy"]
 # ---------------------------------------------------------------------------
 
 _MIN_SECRET_LEN = 8           # Tokens shorter than this are almost never secrets.
-_PLACEHOLDER_MAX_ENTROPY = 3  # Bits/char. Real secrets ≫ 3; placeholders ≪ 3.
+# Low floor: only rejects degenerate repetition strings ("aaaa…", entropy 0).
+# Human-chosen passwords like "supersecretpass" (~2.8 bits/char) still pass.
+_MIN_SECRET_ENTROPY = 2.0
 _MAX_EVIDENCE_LEN = 160       # Truncate evidence lines to a sane width.
 
 
@@ -277,24 +279,24 @@ def _is_placeholder(value: str) -> bool:
         return True
     if _PLACEHOLDER_RE.match(stripped):
         return True
-    # Punctuation-free short words are never secrets.
-    if re.fullmatch(r"[a-z_]+\b", stripped, flags=re.IGNORECASE) and len(stripped) < 16:
-        return True
     return False
 
 
 def _passes_entropy(value: str, rule: _SecretRule) -> bool:
-    """For keyword rules: keep the value only if it's not a placeholder and
-    has enough entropy (or is a long service-style literal)."""
+    """For keyword rules: keep the value only if it's not a placeholder.
+
+    Keyword rules match *labelled* assignments (``password = "..."`` etc.) —
+    a labelled assignment with a non-placeholder value is suspicious even if
+    the value is a low-entropy human word (``supersecretpass`` is a real
+    password at ~2.8 bits/char). The entropy floor here only rejects
+    degenerate repetition strings (``"aaaa…"``, entropy 0) that the
+    placeholder regex doesn't catch.
+    """
     if not rule.require_entropy:
         return True
     if _is_placeholder(value):
         return False
-    # Long literals are treated liberally — even lower-entropy long strings are
-    # suspicious for password-like assignments.
-    if len(value) >= 24:
-        return True
-    return shannon_entropy(value) >= _PLACEHOLDER_MAX_ENTROPY
+    return shannon_entropy(value) >= _MIN_SECRET_ENTROPY
 
 
 def _truncate(text: str) -> str:

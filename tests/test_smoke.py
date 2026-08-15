@@ -312,6 +312,21 @@ class TestHardcodedSecrets:
         assert matches, fs
         assert matches[0].severity == Severity.HIGH
 
+    def test_lowercase_password_not_placeholder(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        # All-lowercase human passwords are real credentials, not placeholders.
+        fs = detect_hardcoded_secrets(self._diff(['PASSWORD = "supersecretpass"']))
+        assert any("password" in f.title.lower() for f in fs), fs
+
+    def test_zero_entropy_long_value_not_flagged(self):
+        from codey.agents.secrets import detect_hardcoded_secrets
+
+        # 24+ char values must still pass an entropy gate — a repeated
+        # character run is not a credential.
+        fs = detect_hardcoded_secrets(self._diff(['token = "' + "a" * 24 + '"']))
+        assert fs == [], fs
+
     def test_no_findings_on_clean_diff(self):
         from codey.agents.secrets import detect_hardcoded_secrets
 
