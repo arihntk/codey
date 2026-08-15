@@ -12,7 +12,7 @@ import json
 from codey.agents.context import ReviewContext
 from codey.agents.evidence import attach_evidence
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
-from codey.llm.response import extract_text
+from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_code_quality_agent"]
@@ -78,7 +78,7 @@ def run_code_quality_agent(
             )),
         ])
         raw = extract_text(response)
-        token_usage = len(raw) // 4
+        token_usage = response_tokens(response, fallback_text=raw)
         findings = _parse_llm_findings(raw)
     except Exception as e:
         findings.append(Finding(

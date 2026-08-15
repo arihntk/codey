@@ -1,4 +1,4 @@
-"""Utilities for extracting text from LLM response objects.
+"""Utilities for extracting text and usage from LLM response objects.
 
 Different providers return ``response.content`` in different shapes:
   - OpenAI / Anthropic / DeepSeek: a plain ``str``
@@ -10,7 +10,7 @@ doesn't need to care about the provider.
 
 from __future__ import annotations
 
-__all__ = ["extract_text"]
+__all__ = ["extract_text", "extract_usage", "response_tokens"]
 
 
 def extract_text(response: object) -> str:
@@ -48,3 +48,43 @@ def extract_text(response: object) -> str:
         return "\n".join(parts) if parts else str(content)
 
     return str(content)
+
+
+def extract_usage(response: object) -> int | None:
+    """Extract the total token usage from an LLM response, if the provider
+    reported it.
+
+    LangChain chat models surface usage on the ``AIMessage`` via
+    ``usage_metadata`` (``{"input_tokens": ..., "output_tokens": ...}``) when
+    the provider returns it. This returns the total when available, otherwise
+    ``None`` so callers can fall back to an estimate.
+
+    Args:
+        response: A langchain ``BaseMessage`` (AIMessage) returned by ``llm.invoke()``.
+
+    Returns:
+        Total token count (input + output) or ``None`` if the provider did
+        not report usage.
+    """
+    metadata = getattr(response, "usage_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    input_tokens = metadata.get("input_tokens")
+    output_tokens = metadata.get("output_tokens")
+    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+        return None
+    return input_tokens + output_tokens
+
+
+def response_tokens(response: object, *, fallback_text: str = "") -> int:
+    """Total tokens for a response, using real provider usage when available.
+
+    Prefers ``usage_metadata`` (input + output). When the provider did not
+    report usage, falls back to a rough estimate (~4 chars per token) of
+    *fallback_text*. The estimate is intentionally only a fallback so the
+    number displayed is honest: real usage when known, estimated otherwise.
+    """
+    real = extract_usage(response)
+    if real is not None:
+        return real
+    return max(1, len(fallback_text) // 4)

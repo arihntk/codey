@@ -15,7 +15,7 @@ from pathlib import Path
 
 from codey.agents.context import ReviewContext
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
-from codey.llm.response import extract_text
+from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_test_agent"]
@@ -155,7 +155,7 @@ def run_test_agent(
                 test_targets = json.loads(text)
             except json.JSONDecodeError:
                 test_targets = []
-            token_usage = len(raw) // 4
+            token_usage = response_tokens(response, fallback_text=raw)
         except Exception:
             pass
 

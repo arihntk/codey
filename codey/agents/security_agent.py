@@ -31,7 +31,7 @@ from codey.agents.context import ReviewContext
 from codey.agents.evidence import attach_evidence
 from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.agents.secrets import detect_hardcoded_secrets
-from codey.llm.response import extract_text
+from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_security_agent"]
@@ -146,14 +146,14 @@ def run_security_agent(
     #    hardcoded one is dropped, to avoid duplicates).
     llm_findings: list[Finding] = []
     if llm is not None:
-        synthesised = _llm_synthesise(
+        synthesised, _usage = _llm_synthesise(
             llm,
             raw_results,
             ctx.full_diff,
             ctx.changed_files,
             hardcoded_findings=hardcoded,
         )
-        token_usage = len(synthesised) // 4
+        token_usage = _usage
         llm_findings = _parse_llm_findings(synthesised)
 
     # Merge: LLM findings first (broader confidentiality judgement), then
@@ -392,7 +392,7 @@ def _llm_synthesise(
     changed_files: list[str],
     *,
     hardcoded_findings: list[Finding] | None = None,
-) -> str:
+) -> tuple[str, int]:
     """Ask the LLM to merge tool outputs + hardcoded-secret findings and
     ADD its own confidentiality-judgement findings for issues that have no
     easy regex anchor (PII, internal endpoints, crypto/auth mistakes, etc.).
@@ -400,6 +400,8 @@ def _llm_synthesise(
     The LLM always reviews the diff — regardless of whether bandit/semgrep/
     gitleaks produced output — so confidential-info leaks are judged, not
     just secrets.
+
+    Returns ``(text, token_usage)``.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -422,9 +424,10 @@ def _llm_synthesise(
                 "for any other confidentiality or security issue you find."
             )),
         ])
-        return extract_text(response)
+        text = extract_text(response)
+        return text, response_tokens(response, fallback_text=text)
     except Exception as e:
-        return f"[] // LLM synthesis failed: {e}"
+        return f"[] // LLM synthesis failed: {e}", 0
 
 
 def _parse_llm_findings(text: str) -> list[Finding]:

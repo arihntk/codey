@@ -14,7 +14,7 @@ from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
 from codey.cache.ast_cache import CacheDB
 from codey.index.callgraph import build_call_graph
 from codey.index.indexer import index_repository
-from codey.llm.response import extract_text
+from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_index_agent"]
@@ -61,7 +61,7 @@ def run_index_agent(
                 HumanMessage(content=f"Repository: {repo.name}\n\n{overview}"),
             ])
             index_summary = extract_text(response)
-            token_usage = len(index_summary) // 4
+            token_usage = response_tokens(response, fallback_text=index_summary)
         except Exception as e:
             findings.append(Finding(
                 category=FindingCategory.ARCHITECTURE,

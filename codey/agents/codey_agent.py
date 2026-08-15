@@ -18,7 +18,7 @@ from codey.agents.schemas import (
     Severity,
     aggregate_severity,
 )
-from codey.llm.response import extract_text
+from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
 __all__ = ["run_codey_agent"]
@@ -164,8 +164,8 @@ def _llm_synthesise(
         try:
             obj = json.loads(text)
             summary = obj.get("summary", text)
-            return summary, len(raw) // 4
+            return summary, response_tokens(response, fallback_text=raw)
         except json.JSONDecodeError:
-            return text, len(raw) // 4
+            return text, response_tokens(response, fallback_text=raw)
     except Exception:
         return "", 0
