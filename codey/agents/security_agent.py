@@ -126,12 +126,17 @@ def run_security_agent(
 
     # 2. External scanners.
     raw_results: dict[str, str] = {}
-    bandit_findings = _run_bandit(repo, py_files)
-    if bandit_findings:
-        raw_results["bandit"] = bandit_findings
-    semgrep_findings = _run_semgrep(repo, all_relevant)
-    if semgrep_findings is not None:
-        raw_results["semgrep"] = semgrep_findings
+    tool_errors: list[str] = []
+    bandit_out, bandit_err = _run_bandit(repo, py_files)
+    if bandit_out:
+        raw_results["bandit"] = bandit_out
+    if bandit_err:
+        tool_errors.append(f"bandit: {bandit_err}")
+    semgrep_out, semgrep_err = _run_semgrep(repo, all_relevant)
+    if semgrep_out is not None:
+        raw_results["semgrep"] = semgrep_out
+    if semgrep_err:
+        tool_errors.append(f"semgrep: {semgrep_err}")
     gitleaks_findings = _run_gitleaks(repo, commit=ctx.git_hash)
     if gitleaks_findings is not None:
         raw_results["gitleaks"] = gitleaks_findings
@@ -142,6 +147,8 @@ def run_security_agent(
 
     token_usage = 0
     report_error: str | None = None
+    if tool_errors:
+        report_error = "; ".join(tool_errors)
 
     # 3. LLM judgement. The LLM always reviews the diff (when available) —
     #    even if no tool flagged anything — so non-secret confidentiality
@@ -159,11 +166,14 @@ def run_security_agent(
         )
         token_usage = _usage
         if synth_error is not None:
-            report_error = synth_error
+            report_error = (report_error + "; " if report_error else "") + synth_error
         else:
             llm_findings = _parse_llm_findings(synthesised)
             if not _llm_output_is_parseable(synthesised):
-                report_error = "LLM returned unparseable output (expected a JSON array of findings)"
+                report_error = (
+                    (report_error + "; " if report_error else "")
+                    + "LLM returned unparseable output (expected a JSON array of findings)"
+                )
 
     # Merge: LLM findings first (broader confidentiality judgement), then
     # tool findings, then hardcoded-secret findings — dropping any LLM/tool
@@ -247,11 +257,17 @@ def run_security_agent(
 # --- Bandit ----
 
 
-def _run_bandit(repo: Path, py_files: list[str]) -> str:
+def _run_bandit(repo: Path, py_files: list[str]) -> tuple[str, str | None]:
+    """Run bandit; returns (stdout, error_note).
+
+    Returncodes 0/1 (clean / issues found) are normal output; 2/3 mean bandit
+    itself failed (config error, unparseable file) — that's surfaced as an
+    error note instead of being silently treated as 'no findings'.
+    """
     if not py_files:
-        return ""
+        return "", None
     if not shutil.which("bandit"):
-        return ""
+        return "", None
     try:
         # '--' separates options from file paths so repo filenames that begin
         # with '-' can't be interpreted as flags.
@@ -261,10 +277,12 @@ def _run_bandit(repo: Path, py_files: list[str]) -> str:
             env=scrubbed_env(),
         )
         if proc.returncode in (0, 1):  # 1 = issues found, still valid output
-            return proc.stdout
+            return proc.stdout, None
+        if proc.returncode in (2, 3):  # fatal — surface, don't fake-clean
+            return "", (proc.stderr.strip() or "bandit exited fatally")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    return ""
+    return "", None
 
 
 def _parse_bandit_json(raw: str) -> list[Finding]:
@@ -293,26 +311,33 @@ def _parse_bandit_json(raw: str) -> list[Finding]:
 # --- Semgrep ----
 
 
-def _run_semgrep(repo: Path, files: list[str]) -> str | None:
+def _run_semgrep(repo: Path, files: list[str]) -> tuple[str | None, str | None]:
+    """Run semgrep; returns (stdout, error_note).
+
+    Scans ALL given files — no silent 50-file cap. Returncodes 0/1 are
+    normal; other codes are surfaced as an error note.
+    """
     if not shutil.which("semgrep"):
-        return None
+        return None, None
     if not files:
-        return None
+        return None, None
     try:
         # '--' separates options from file paths so repo filenames that begin
         # with '-' can't be interpreted as flags.
         cmd = ["semgrep", "--json", "--quiet", "--no-rewrite-rule-ids", "--"]
         # scan changed paths
-        cmd.extend(files[:50])
+        cmd.extend(files)
         proc = subprocess.run(
             cmd, cwd=str(repo), capture_output=True, text=True, timeout=90, check=False,
             env=scrubbed_env(),
         )
         if proc.returncode in (0, 1):
-            return proc.stdout
+            return proc.stdout, None
+        if proc.returncode > 1:
+            return None, (proc.stderr.strip() or "semgrep exited abnormally")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    return None
+    return None, None
 
 
 def _parse_semgrep_json(raw: str) -> list[Finding]:

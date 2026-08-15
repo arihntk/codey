@@ -17,7 +17,9 @@ from codey.index.languages import detect_language
 
 __all__ = ["chunk_diff", "chunk_file_diff"]
 
-_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER = re.compile(
+    r"^@{2,3} (?:-\d+(?:,\d+)? )+?\+(\d+)(?:,(\d+))? @{2,3}"
+)
 
 
 def chunk_file_diff(
@@ -111,7 +113,7 @@ def _split_hunks(diff_text: str) -> list[tuple[int, list[str]]]:
         if m:
             if current_start is not None:
                 hunks.append((current_start, current_lines))
-            current_start = int(m.group(3))
+            current_start = int(m.group(1))
             current_lines = [line]
         elif current_start is not None:
             current_lines.append(line)

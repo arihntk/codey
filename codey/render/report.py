@@ -108,7 +108,7 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
     agent_table.add_column("Tokens", justify="right", style="dim")
     agent_table.add_column("Summary", ratio=1, overflow="fold")
 
-    for name in ("index", "security", "code_quality", "test"):
+    for name in _agent_order():
         report = review.agent_reports.get(name)
         if not report:
             continue
@@ -124,6 +124,20 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
             Markdown(report.summary) if report.summary else Text("(no summary)", style="dim"),
         )
     console.print(agent_table)
+
+
+def _agent_order() -> list[str]:
+    """Agent iteration order for the table — from the registry so a newly
+    registered agent automatically appears (no hardcoded name lists)."""
+    try:
+        from codey.graph.registry import ordered_agent_names
+
+        names = ordered_agent_names()
+        if names:
+            return names
+    except Exception:
+        pass
+    return ["index", "security", "code_quality", "test"]
 
 
 def print_finding_table(findings: list[Finding], *, console: Console | None = None) -> None:

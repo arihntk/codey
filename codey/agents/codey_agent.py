@@ -129,7 +129,7 @@ def _build_text_summary(
             + (" …" if len(ctx.pruned_chunks) > 10 else "")
         )
     lines.append("")
-    for name in ("index", "security", "code_quality", "test"):
+    for name in _agent_order():
         report = reports.get(name)
         if not report:
             continue
@@ -146,6 +146,20 @@ def _build_text_summary(
         lines.append("")
     lines.append("---")
     return "\n".join(lines)
+
+
+def _agent_order() -> list[str]:
+    """Agent iteration order for summaries — from the registry so a newly
+    registered agent automatically appears (no hardcoded name lists)."""
+    try:
+        from codey.graph.registry import ordered_agent_names
+
+        names = ordered_agent_names()
+        if names:
+            return names
+    except Exception:
+        pass
+    return ["index", "security", "code_quality", "test"]
 
 
 def _default_recommendation(findings: list[Finding], *, errors: list[str] | None = None) -> str:

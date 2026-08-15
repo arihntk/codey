@@ -16,7 +16,14 @@ from dataclasses import dataclass, field
 
 from codey.graph.state import ReviewState
 
-__all__ = ["AgentSpec", "get_specs", "register", "first_agent", "terminal_agents"]
+__all__ = [
+    "AgentSpec",
+    "get_specs",
+    "register",
+    "first_agent",
+    "terminal_agents",
+    "ordered_agent_names",
+]
 
 StateUpdate = dict
 
@@ -69,3 +76,12 @@ def terminal_agents(specs: list[AgentSpec]) -> list[str]:
     """Agent names that nothing depends on — these connect to END."""
     depended_on = {dep for spec in specs for dep in spec.depends_on}
     return [spec.name for spec in specs if spec.name not in depended_on]
+
+
+def ordered_agent_names() -> list[str]:
+    """Registered agent names in registration (pipeline) order.
+
+    Used by summary/table renderers so a new AgentSpec automatically appears
+    in the output — no hardcoded name lists.
+    """
+    return [spec.name for spec in get_specs()]
