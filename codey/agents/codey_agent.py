@@ -1,9 +1,4 @@
-"""CodeyAgent (orchestrator) — synthesises the final review.
-
-After all worker agents have run in parallel, the orchestrator collects their
-AgentReports, asks the LLM to write an executive summary, picks the overall
-severity, and decides a recommendation (approve / request_changes / block).
-"""
+"""CodeyAgent (orchestrator) — synthesises the final review."""
 
 from __future__ import annotations
 
@@ -19,6 +14,7 @@ from codey.agents.schemas import (
     aggregate_severity,
     severity_weight,
 )
+from codey.graph.registry import ordered_agent_names
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 
@@ -34,10 +30,30 @@ _SYNTHESIS_SYSTEM = (
     "CRITICAL: Your summary MUST reference concrete evidence from the agent "
     "reports — cite specific findings, tool outputs, file paths, and test "
     "results to prove the review is grounded in actual analysis. Do not make "
-    "claims that are not supported by the provided agent reports. "
-    "Consider the severity and confidence of each finding. Don't repeat findings; "
-    "instead provide an actionable executive assessment."
+    "claims not supported by the provided agent reports. Consider the severity "
+    "and confidence of each finding. Don't repeat findings; provide an actionable "
+    "executive assessment."
 )
+
+_REC_RANK = {"approve": 0, "request_changes": 1, "block": 2}
+
+
+def _rec_rank(rec: str) -> int:
+    return _REC_RANK.get(rec, 0)
+
+
+def _degrade_recommendation(rec: str) -> str:
+    """Never approve an unverified review — degrade 'approve' to 'request_changes'."""
+    return "request_changes" if rec == "approve" else rec
+
+
+def _default_recommendation(findings: list[Finding], *, errors: list[str] | None = None) -> str:
+    base = "approve"
+    if any(f.severity == Severity.CRITICAL for f in findings):
+        base = "block"
+    elif any(f.severity == Severity.HIGH and f.confidence >= 0.7 for f in findings):
+        base = "request_changes"
+    return _degrade_recommendation(base) if errors else base
 
 
 def run_codey_agent(
@@ -47,24 +63,9 @@ def run_codey_agent(
     *,
     prior_errors: list[str] | None = None,
 ) -> ReviewSummary:
-    """Synthesise all agent reports into a final ReviewSummary.
-
-    ``prior_errors`` (from the graph state) are propagated into the review's
-    ``errors`` field along with any errors surfaced by the agents themselves,
-    so a failing LLM call is never silently presented as a clean review.
-
-    The verdict is never allowed to be optimistic: if any agent errored, the
-    recommendation degrades to at most ``request_changes`` (an incomplete
-    review cannot approve).
-    """
-    all_findings: list[Finding] = []
-    for r in agent_reports.values():
-        all_findings.extend(r.findings)
-
+    all_findings: list[Finding] = [f for r in agent_reports.values() for f in r.findings]
     overall = aggregate_severity(all_findings)
 
-    # Collect structured errors: prior graph errors, agent-level errors, and
-    # orchestrator synthesis errors — never silently dropped.
     errors: list[str] = list(prior_errors or [])
     for r in agent_reports.values():
         if r.status == "error" and r.error:
@@ -79,10 +80,7 @@ def run_codey_agent(
         if llm_summary:
             summary_text = llm_summary
         # The LLM verdict can refine the deterministic one but NEVER make it
-        # more optimistic: severity = max(deterministic, llm), recommendation
-        # = the stricter of the two. A hardcoded sk-… key (deterministic
-        # CRITICAL/block, confidence 0.95) must not be overridden by an LLM
-        # that says "low"/"approve".
+        # more optimistic (severity = max, recommendation = the stricter).
         if synth_error is None:
             try:
                 llm_sev_parsed = Severity(llm_sev.lower())
@@ -90,15 +88,14 @@ def run_codey_agent(
                     overall = llm_sev_parsed
             except (ValueError, AttributeError, TypeError):
                 pass
-            if llm_rec in ("approve", "request_changes", "block"):
-                if _rec_rank(llm_rec) > _rec_rank(rec):
-                    rec = llm_rec
+            if llm_rec in ("approve", "request_changes", "block") and _rec_rank(llm_rec) > _rec_rank(rec):
+                rec = llm_rec
             if errors:
                 rec = _degrade_recommendation(rec)
     if synth_error is not None:
         errors.append(f"[codey] summary synthesis failed: {synth_error}")
 
-    review = ReviewSummary(
+    return ReviewSummary(
         overall_severity=overall,
         summary=summary_text,
         commit_hash=ctx.git_hash,
@@ -111,94 +108,39 @@ def run_codey_agent(
         errors=errors,
         pruned_chunks=list(ctx.pruned_chunks),
     )
-    return review
 
 
-def _build_text_summary(
-    ctx: ReviewContext,
-    reports: dict[str, AgentReport],
-    overall: Severity,
-    rec: str,
-) -> str:
-    """Build a markdown summary without LLM if synthesis fails."""
-    lines: list[str] = []
-    lines.append(f"## Codey Review — {ctx.git_hash[:12] if ctx.git_hash else 'HEAD'}")
-    lines.append("")
-    lines.append(f"**Commit:** {ctx.commit_message[:200]}")
-    lines.append(f"**Verdict:** {rec.replace('_', ' ').title()} ({overall.value})")
-    lines.append(f"**Findings:** {sum(len(r.findings) for r in reports.values())} across {len(reports)} agent reports")
+def _build_text_summary(ctx: ReviewContext, reports: dict[str, AgentReport], overall: Severity, rec: str) -> str:
+    lines = [
+        f"## Codey Review — {ctx.git_hash[:12] if ctx.git_hash else 'HEAD'}",
+        "",
+        f"**Commit:** {ctx.commit_message[:200]}",
+        f"**Verdict:** {rec.replace('_', ' ').title()} ({overall.value})",
+        f"**Findings:** {sum(len(r.findings) for r in reports.values())} across {len(reports)} agent reports",
+    ]
     if ctx.pruned_chunks:
         lines.append(
             f"**Coverage:** {len(ctx.pruned_chunks)} diff chunk(s) were pruned "
-            f"to stay within the context budget: "
-            f"{', '.join(ctx.pruned_chunks[:10])}"
+            f"to stay within the context budget: {', '.join(ctx.pruned_chunks[:10])}"
             + (" …" if len(ctx.pruned_chunks) > 10 else "")
         )
     lines.append("")
-    for name in _agent_order():
+    for name in ordered_agent_names():
         report = reports.get(name)
         if not report:
             continue
         lines.append(f"### {report.agent.title()} Agent ({report.status})")
         lines.append(f"> {report.summary}")
-        if report.findings:
-            for f in report.findings:
-                if f.severity == Severity.INFO:
-                    continue
-                loc = f"{f.file_path}:{f.line_start}" if f.file_path else ""
-                lines.append(f"- **[{f.severity.value.upper()}]** {f.title}" + (f" `{loc}`" if loc else ""))
-                if f.recommendation:
-                    lines.append(f"  - {f.recommendation}")
+        for f in report.findings:
+            if f.severity == Severity.INFO:
+                continue
+            loc = f"{f.file_path}:{f.line_start}" if f.file_path else ""
+            lines.append(f"- **[{f.severity.value.upper()}]** {f.title}" + (f" `{loc}`" if loc else ""))
+            if f.recommendation:
+                lines.append(f"  - {f.recommendation}")
         lines.append("")
     lines.append("---")
     return "\n".join(lines)
-
-
-def _agent_order() -> list[str]:
-    """Agent iteration order for summaries — from the registry so a newly
-    registered agent automatically appears (no hardcoded name lists)."""
-    try:
-        from codey.graph.registry import ordered_agent_names
-
-        names = ordered_agent_names()
-        if names:
-            return names
-    except Exception:
-        pass
-    return ["index", "security", "code_quality", "test"]
-
-
-def _default_recommendation(findings: list[Finding], *, errors: list[str] | None = None) -> str:
-    """Determine recommendation based on highest-severity findings.
-
-    An incomplete review can never approve: if any error occurred, the
-    recommendation degrades to at most ``request_changes`` so a total LLM
-    outage doesn't produce a green light.
-    """
-    base = "approve"
-    if any(f.severity == Severity.CRITICAL for f in findings):
-        base = "block"
-    elif any(f.severity == Severity.HIGH and f.confidence >= 0.7 for f in findings):
-        base = "request_changes"
-    if errors:
-        return _degrade_recommendation(base)
-    return base
-
-
-def _degrade_recommendation(rec: str) -> str:
-    """Lower a recommendation to at most ``request_changes`` when the review
-    is incomplete (errors occurred). Never approve an unverified review."""
-    if rec == "approve":
-        return "request_changes"
-    return rec
-
-
-_REC_RANK = {"approve": 0, "request_changes": 1, "block": 2}
-
-
-def _rec_rank(rec: str) -> int:
-    """Ordering: block > request_changes > approve."""
-    return _REC_RANK.get(rec, 0)
 
 
 def _llm_synthesise(
@@ -206,19 +148,11 @@ def _llm_synthesise(
     reports: dict[str, AgentReport],
     ctx: ReviewContext,
 ) -> tuple[str, str, str, int, str | None]:
-    """Ask the LLM to write an executive summary + verdict.
-
-    Returns ``(summary, severity, recommendation, token_usage, error)``.
-    ``error`` is set when the LLM call itself failed; unparseable output
-    falls back to the raw text and is reported as a parse error. The LLM's
-    ``severity``/``recommendation`` are validated by the caller before use.
-    """
+    """Returns ``(summary, severity, recommendation, token_usage, error)``."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    # Serialize reports compactly.
-    report_data: list[dict[str, Any]] = []
-    for name, r in reports.items():
-        report_data.append({
+    report_data: list[dict[str, Any]] = [
+        {
             "agent": r.agent,
             "status": r.status,
             "summary": r.summary,
@@ -235,7 +169,9 @@ def _llm_synthesise(
                 }
                 for f in r.findings
             ],
-        })
+        }
+        for r in reports.values()
+    ]
 
     try:
         response = invoke_with_retry(llm, [
@@ -255,13 +191,9 @@ def _llm_synthesise(
         usage = response_tokens(response, fallback_text=raw)
         try:
             obj = json.loads(text)
-            summary = obj.get("summary", text)
-            severity = str(obj.get("overall_severity", "")).lower()
-            rec = str(obj.get("recommendation", "")).lower()
-            return summary, severity, rec, usage, None
+            return obj.get("summary", text), str(obj.get("overall_severity", "")).lower(), \
+                str(obj.get("recommendation", "")).lower(), usage, None
         except json.JSONDecodeError:
-            # LLM output wasn't valid JSON — surface it instead of silently
-            # using raw text as the summary.
             return text, "", "", usage, "LLM output was not valid JSON"
     except Exception as e:
         return "", "", "", 0, str(e)

@@ -1,11 +1,4 @@
-"""IndexAgent — indexes the repo and extracts architecture/design principles.
-
-Responsibilities:
-1. Run the tree-sitter indexer + jedi call graph builder.
-2. Use the LLM to synthesise an architecture/design summary from the
-   indexed symbol table (entry points, module structure, conventions).
-3. Emit an AgentReport describing the codebase.
-"""
+"""IndexAgent — indexes the repo and extracts architecture/design principles."""
 
 from __future__ import annotations
 
@@ -27,42 +20,22 @@ _INDEX_SYSTEM = (
     "3. Code quality benchmarks (naming, typing, docstring coverage)\n\n"
     "CRITICAL: Cite specific file paths and symbol names from the provided "
     "symbol table as evidence for each observation. Do not fabricate file "
-    "paths or symbols that are not in the input.\n"
+    "paths or symbols not in the input.\n"
     "Output 5-10 bullet points. Be specific, cite file paths."
 )
 
 
-def run_index_agent(
-    ctx: ReviewContext,
-    db: CacheDB,
-    llm: object | None = None,
-) -> tuple[AgentReport, str]:
-    """Produce an architecture summary from the indexed symbol table.
-
-    Indexing is owned by the pipeline (run_pipeline calls index_repository
-    before the graph starts); this agent only indexes if the current hash
-    isn't cached yet (e.g. direct invocation outside the pipeline) so the
-    work is never duplicated.
-
-    Returns (AgentReport, index_summary_string).
-    """
+def run_index_agent(ctx: ReviewContext, db: CacheDB, llm: object | None = None) -> tuple[AgentReport, str]:
     repo = ctx.repo_path
     cache_key = str(ctx.cache_repo_path or repo)
     if not db.has_indexed_hash(cache_key, ctx.git_hash):
         index_result = index_repository(repo, db, cache_repo_path=ctx.cache_repo_path)
         build_call_graph(repo, index_result.git_hash, db, cache_repo_path=ctx.cache_repo_path)
     else:
-        # Pipeline already indexed this hash; just report cached counts.
         cached_paths = db.list_file_rel_paths(cache_key, ctx.git_hash)
-        index_result = IndexResult(
-            git_hash=ctx.git_hash,
-            total_files=len(cached_paths),
-            reused_files=len(cached_paths),
-        )
+        index_result = IndexResult(git_hash=ctx.git_hash, total_files=len(cached_paths), reused_files=len(cached_paths))
 
-    # Build symbol overview for the LLM.
     overview = _build_symbol_overview(db, cache_key, index_result.git_hash)
-
     index_summary = overview
     findings: list[Finding] = []
     token_usage = 0
@@ -92,7 +65,6 @@ def run_index_agent(
             f"{len(set(s.rel_path for s in db.all_symbols(str(repo), index_result.git_hash)))} files."
         ),
         evidence=overview[:1000] if overview else "",
-        file_path=None,
         confidence=1.0,
     ))
 
@@ -100,8 +72,7 @@ def run_index_agent(
         agent="index",
         status="error" if report_error is not None else "completed",
         summary=index_summary[:500] if index_summary else (
-            f"Indexed {index_result.total_files} files, "
-            f"{index_result.symbols_extracted} symbols."
+            f"Indexed {index_result.total_files} files, {index_result.symbols_extracted} symbols."
         ),
         findings=findings,
         metadata={
@@ -118,14 +89,10 @@ def run_index_agent(
 
 
 def _build_symbol_overview(db: CacheDB, repo: str, git_hash: str, *, max_files: int = 60) -> str:
-    """Build a compact text overview of the indexed symbols for LLM consumption."""
     lines: list[str] = []
-    symbols = db.all_symbols(repo, git_hash)
     by_file: dict[str, list[str]] = {}
-    for s in symbols:
-        by_file.setdefault(s.rel_path, []).append(
-            f"  L{s.line_start}-{s.line_end} {s.kind} {s.qualified_name}"
-        )
+    for s in db.all_symbols(repo, git_hash):
+        by_file.setdefault(s.rel_path, []).append(f"  L{s.line_start}-{s.line_end} {s.kind} {s.qualified_name}")
     for i, (path, syms) in enumerate(sorted(by_file.items())):
         if i >= max_files:
             lines.append(f"... and {len(by_file) - max_files} more files")

@@ -1,25 +1,4 @@
-"""High-precision hardcoded-secret leak detector for source code.
-
-This module is a deterministic, zero-dependency first pass at finding
-credentials / confidential tokens embedded directly in source code.  It is
-designed to be:
-
-* **high-precision** — prefix-based rules for well-known secret formats
-  combined with Shannon-entropy checks to exclude obvious placeholders
-  (`"changeme"`, `"your-key"`, `<API_KEY>`, empty strings).
-* **non-exhaustive by design** — it intentionally covers secrets with
-  recognisable prefixes AND a generic keyword/entropy heuristic.  It is
-  explicitly **not** the last word: LLM judgement runs on top of it, and is
-  expected to catch confidential-info leaks that have no easy regex anchor
-  (PII, internal URLs, account numbers, provider-specific labels).
-* **a fallback** — when the LLM is unavailable, its findings are the primary
-  signal.  When the LLM is available, its findings seed the LLM synthesis as
-  additional context (and the LLM is told to keep the findings already
-  present and add its own).
-
-Findings produced here use ``FindingCategory.SECURITY`` and carry evidence
-copied verbatim from the supplied diff/file text.
-"""
+"""Deterministic hardcoded-secret detector (zero dependencies, high precision)."""
 
 from __future__ import annotations
 
@@ -32,23 +11,12 @@ from codey.agents.schemas import Finding, FindingCategory, Severity
 
 __all__ = ["detect_hardcoded_secrets", "shannon_entropy"]
 
-# ---------------------------------------------------------------------------
-# Rule catalog
-# ---------------------------------------------------------------------------
-
-_MIN_SECRET_LEN = 8           # Tokens shorter than this are almost never secrets.
-# Low floor: only rejects degenerate repetition strings ("aaaa…", entropy 0).
-# Human-chosen passwords like "supersecretpass" (~2.8 bits/char) still pass.
-_MIN_SECRET_ENTROPY = 2.0
-_MAX_EVIDENCE_LEN = 160       # Truncate evidence lines to a sane width.
-
+_MIN_SECRET_LEN = 8  # shorter tokens are almost never secrets
+_MIN_SECRET_ENTROPY = 2.0  # only rejects degenerate repetition ("aaaa…")
+_MAX_EVIDENCE_LEN = 160
 
 _SEVERITY_RANK = {
-    Severity.CRITICAL: 4,
-    Severity.HIGH: 3,
-    Severity.MEDIUM: 2,
-    Severity.LOW: 1,
-    Severity.INFO: 0,
+    Severity.CRITICAL: 4, Severity.HIGH: 3, Severity.MEDIUM: 2, Severity.LOW: 1, Severity.INFO: 0,
 }
 
 
@@ -61,189 +29,61 @@ class _SecretRule:
     id: str
     label: str
     severity: Severity
-    # Compiled regex with at least one capture group holding the secret value.
     pattern: re.Pattern[str]
-    # Whether to apply an entropy check on the captured value (to filter
-    # placeholders).  Prefix-matched secrets (sk-…, ghp_…) are reliable
-    # enough that the entropy check is skipped.
     require_entropy: bool
 
 
-# Well-known secret prefixes / formats.  Order matters only for tie-breaking
-# the *title* — each line of the diff is checked against every rule.
+# Well-known secret prefixes/formats. Prefix rules skip the entropy check.
 _PREFIX_RULES: tuple[_SecretRule, ...] = (
-    _SecretRule(
-        id="openai_api_key",
-        label="OpenAI API key",
-        severity=Severity.CRITICAL,
-        pattern=re.compile(
-            r"\b(sk-[A-Za-z0-9_\-]{20,})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="github_pat",
-        label="GitHub personal access token",
-        severity=Severity.CRITICAL,
-        pattern=re.compile(
-            r"(gh[pousr]_[A-Za-z0-9]{20,})\b|(github_pat_[A-Za-z0-9_]{22,})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="aws_access_key_id",
-        label="AWS access key ID",
-        severity=Severity.CRITICAL,
-        pattern=re.compile(
-            r"\b((AKIA|ASIA|AGPA|AROA|AIDA|ANPA|ANVA|APKA)[0-9A-Z]{16})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="aws_secret_access_key",
-        label="AWS secret access key",
-        severity=Severity.CRITICAL,
-        # 40-char base64. This rule is intentionally checked *alongside* the
-        # generic b64 rule; prefix rules win when both match.
-        pattern=re.compile(
-            r'''(?<=["'`])([A-Za-z0-9/+=]{40})(?=["'`])''',
-        ),
-        require_entropy=True,
-    ),
-    _SecretRule(
-        id="slack_token",
-        label="Slack token",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            r"\b(xox[baprs]-[A-Za-z0-9\-]{10,})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="google_api_key",
-        label="Google API key",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            r"\b(AIza[0-9A-Za-z_\-]{35})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="google_oauth_id",
-        label="Google OAuth client ID",
-        severity=Severity.MEDIUM,
-        pattern=re.compile(
-            r"\b([0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com)\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="stripe_live_key",
-        label="Stripe live secret key",
-        severity=Severity.CRITICAL,
-        pattern=re.compile(
-            r"\b(sk_live_[A-Za-z0-9]{24,})|\b(rk_live_[A-Za-z0-9]{24,})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="twilio_api_key",
-        label="Twilio API key",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            r"\b(SK[0-9a-fA-F]{32})\b",
-        ),
-        require_entropy=False,
-    ),
-    _SecretRule(
-        id="jwt",
-        label="JWT token",
-        severity=Severity.HIGH,
-        # Three dot-separated base64url segments; first segment small (header).
-        pattern=re.compile(
-            r"\b(eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})\b",
-        ),
-        require_entropy=False,
-    ),
+    _SecretRule("openai_api_key", "OpenAI API key", Severity.CRITICAL,
+                re.compile(r"\b(sk-[A-Za-z0-9_\-]{20,})\b"), False),
+    _SecretRule("github_pat", "GitHub personal access token", Severity.CRITICAL,
+                re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})\b|(github_pat_[A-Za-z0-9_]{22,})\b"), False),
+    _SecretRule("aws_access_key_id", "AWS access key ID", Severity.CRITICAL,
+                re.compile(r"\b((AKIA|ASIA|AGPA|AROA|AIDA|ANPA|ANVA|APKA)[0-9A-Z]{16})\b"), False),
+    _SecretRule("aws_secret_access_key", "AWS secret access key", Severity.CRITICAL,
+                re.compile(r'''(?<=["'`])([A-Za-z0-9/+=]{40})(?=["'`])'''), True),
+    _SecretRule("slack_token", "Slack token", Severity.HIGH,
+                re.compile(r"\b(xox[baprs]-[A-Za-z0-9\-]{10,})\b"), False),
+    _SecretRule("google_api_key", "Google API key", Severity.HIGH,
+                re.compile(r"\b(AIza[0-9A-Za-z_\-]{35})\b"), False),
+    _SecretRule("google_oauth_id", "Google OAuth client ID", Severity.MEDIUM,
+                re.compile(r"\b([0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com)\b"), False),
+    _SecretRule("stripe_live_key", "Stripe live secret key", Severity.CRITICAL,
+                re.compile(r"\b(sk_live_[A-Za-z0-9]{24,})|\b(rk_live_[A-Za-z0-9]{24,})\b"), False),
+    _SecretRule("twilio_api_key", "Twilio API key", Severity.HIGH,
+                re.compile(r"\b(SK[0-9a-fA-F]{32})\b"), False),
+    _SecretRule("jwt", "JWT token", Severity.HIGH,
+                re.compile(r"\b(eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})\b"), False),
 )
 
+# Generic keyword-based confidential-value rules (labelled assignments). Entropy
+# + placeholder filtering is mandatory so `password = ""` isn't flagged.
+def _kw(rule_id: str, label: str, sev: Severity, keywords: str) -> _SecretRule:
+    return _SecretRule(
+        rule_id, label, sev,
+        re.compile(rf"(?i)\b(?:{keywords})\b\s*[:=]\s*([\"'`])(?P<val>[^\"'`]+)\1"),
+        True,
+    )
 
-# Generic keyword-based confidential value rules.  These cover passwords,
-# tokens, private keys, and similar *labelled* secret assignments across
-# many languages.  Entropy + placeholder filtering is **mandatory** here so
-# values like `password = ""` or `token = "your-token-here"` are not flagged
-# as real leaks.
+
 _KEYWORD_RULES: tuple[_SecretRule, ...] = (
-    _SecretRule(
-        id="password_literal",
-        label="Hardcoded password",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            # `password`, `passwd`, `pwd` = "..." | '...' | `...`
-            r"(?i)\b(?:password|passwd|pwd)\b\s*[:=]\s*"
-            r"([\"'`])(?P<val>[^\"'`]+)\1",
-        ),
-        require_entropy=True,
-    ),
-    _SecretRule(
-        id="secret_literal",
-        label="Hardcoded secret",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            r"(?i)\b(?:secret|secret[_-]?key|client[_-]?secret)\b\s*[:=]\s*"
-            r"([\"'`])(?P<val>[^\"'`]+)\1",
-        ),
-        require_entropy=True,
-    ),
-    _SecretRule(
-        id="token_literal",
-        label="Hardcoded auth token",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            # `token`, `access_token`, `refresh_token`, `auth_token`, `bearer_token` = "..."
-            r"(?i)\b(?:[a-z0-9_]*token|bearer)\b\s*[:=]\s*"
-            r"([\"'`])(?P<val>[^\"'`]+)\1",
-        ),
-        require_entropy=True,
-    ),
-    _SecretRule(
-        id="api_key_literal",
-        label="Hardcoded API key",
-        severity=Severity.HIGH,
-        pattern=re.compile(
-            r"(?i)\b(?:api[_-]?key|apikey|access[_-]?key)\b\s*[:=]\s*"
-            r"([\"'`])(?P<val>[^\"'`]+)\1",
-        ),
-        require_entropy=True,
-    ),
-    _SecretRule(
-        id="private_key_literal",
-        label="Hardcoded private key",
-        severity=Severity.CRITICAL,
-        # PEM private keys (RSA / EC / OPENSSH / generic).  This is a *format*
-        # match (BEGIN … END block) so no entropy gate is needed.
-        pattern=re.compile(
-            r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
-            r"[\s\S]{1,8000}?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----",
-        ),
-        require_entropy=False,
-    ),
+    _kw("password_literal", "Hardcoded password", Severity.HIGH, "password|passwd|pwd"),
+    _kw("secret_literal", "Hardcoded secret", Severity.HIGH, "secret|secret[_-]?key|client[_-]?secret"),
+    _kw("token_literal", "Hardcoded auth token", Severity.HIGH, "[a-z0-9_]*token|bearer"),
+    _kw("api_key_literal", "Hardcoded API key", Severity.HIGH, "api[_-]?key|apikey|access[_-]?key"),
+    _SecretRule("private_key_literal", "Hardcoded private key", Severity.CRITICAL,
+                re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
+                           r"[\s\S]{1,8000}?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), False),
 )
 
-
-# Placeholders commonly used in examples / fixtures. Values matching any of
-# these are never treated as real secrets, even if they coincidentally pass
-# the entropy check.
 _PLACEHOLDER_RE = re.compile(
     r"""(?x)
       ^(?:
-        # pure layout tokens
         [\s<>{}\[\]()'"`,;:]* |
-        # phrase-like placeholders
         your[_\-\s]?[a-z0-9_\-\s]* |
         (?:example|sample|test|demo|dummy|placeholder|fake|none|null|
             undefined|changeme|todo|fixme|default|xxx+|yyy+|abc+|123+) |
-        # Sentinel placeholders composed only of `x`/`.`/`?`
         x+|\.+|\?+
       )$
       """,
@@ -251,17 +91,7 @@ _PLACEHOLDER_RE = re.compile(
 )
 
 
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
-
-
 def shannon_entropy(s: str) -> float:
-    """Return the Shannon entropy (bits per character) of *s*.
-
-    ``0`` for empty strings.  Real secrets tend to be ≥ 3 bits/char;
-    placeholders and short words tend to be < 3.
-    """
     if not s:
         return 0.0
     counts: dict[str, int] = {}
@@ -277,21 +107,10 @@ def _is_placeholder(value: str) -> bool:
     stripped = value.strip()
     if len(stripped) < _MIN_SECRET_LEN:
         return True
-    if _PLACEHOLDER_RE.match(stripped):
-        return True
-    return False
+    return bool(_PLACEHOLDER_RE.match(stripped))
 
 
 def _passes_entropy(value: str, rule: _SecretRule) -> bool:
-    """For keyword rules: keep the value only if it's not a placeholder.
-
-    Keyword rules match *labelled* assignments (``password = "..."`` etc.) —
-    a labelled assignment with a non-placeholder value is suspicious even if
-    the value is a low-entropy human word (``supersecretpass`` is a real
-    password at ~2.8 bits/char). The entropy floor here only rejects
-    degenerate repetition strings (``"aaaa…"``, entropy 0) that the
-    placeholder regex doesn't catch.
-    """
     if not rule.require_entropy:
         return True
     if _is_placeholder(value):
@@ -301,14 +120,7 @@ def _passes_entropy(value: str, rule: _SecretRule) -> bool:
 
 def _truncate(text: str) -> str:
     text = text.strip()
-    if len(text) <= _MAX_EVIDENCE_LEN:
-        return text
-    return text[: _MAX_EVIDENCE_LEN - 1] + "…"
-
-
-# ---------------------------------------------------------------------------
-# Line context
-# ---------------------------------------------------------------------------
+    return text if len(text) <= _MAX_EVIDENCE_LEN else text[: _MAX_EVIDENCE_LEN - 1] + "…"
 
 
 @dataclass
@@ -319,12 +131,6 @@ class _Line:
 
 
 def _iter_diff_lines(diff: str, *, changed_only: bool = True) -> Iterable[_Line]:
-    """Yield ``_Line`` objects from a unified diff.
-
-    ``changed_only=True`` restricts output to ``+`` lines (additions) since
-    hardcoded secrets are introduced in additions; removed secrets are
-    *good* and should not produce findings.
-    """
     cur_file = ""
     new_line = 0
     for raw in diff.splitlines():
@@ -335,7 +141,6 @@ def _iter_diff_lines(diff: str, *, changed_only: bool = True) -> Iterable[_Line]
             cur_file = raw[6:].strip()
             continue
         if raw.startswith("@@"):
-            # @@ -a,b +c,d @@  → c is the start of the new hunk.
             m = re.search(r"\+(\d+)(?:,(\d+))?", raw)
             if m:
                 new_line = int(m.group(1)) - 1
@@ -345,7 +150,6 @@ def _iter_diff_lines(diff: str, *, changed_only: bool = True) -> Iterable[_Line]
             if changed_only:
                 yield _Line(cur_file, new_line, raw[1:])
         elif raw.startswith("-") and not raw.startswith("---"):
-            # Removal — do not emit.
             continue
         else:
             new_line += 1
@@ -369,27 +173,11 @@ def _make_finding(rule: _SecretRule, line: _Line, snippet: str, description: str
     )
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def detect_hardcoded_secrets(diff: str, *, file_sources: dict[str, str] | None = None) -> list[Finding]:
-    """Scan *diff* (and optionally full file sources) for hardcoded secrets.
-
-    Returns a de-duplicated list of :class:`Finding` objects. The scan is
-    purely deterministic; results include verbatim ``evidence`` copied from
-    the diff line. No findings are emitted for *removed* lines (a secret
-    being deleted is good news).
-    """
     if not diff and not file_sources:
         return []
 
     findings: list[Finding] = []
-    # Keyed by (value, file, line) → keep the most severe finding for that
-    # exact secret value on that exact line.  This is what prevents e.g.
-    # `API_KEY = "sk-..."` from being reported twice (once by the OpenAI
-    # prefix rule, once by the generic API-key keyword rule).
     by_value: dict[tuple[str, str, int], Finding] = {}
     seen_keys: set[tuple[str, str, int]] = set()
 
@@ -404,18 +192,13 @@ def detect_hardcoded_secrets(diff: str, *, file_sources: dict[str, str] | None =
                 m = rule.pattern.search(line.text)
                 if not m:
                     continue
-
-                # Extract the value for keyword rules; prefix rules use group 0.
-                value = ""
                 gd = m.groupdict()
                 if "val" in gd and gd["val"]:
                     value = gd["val"]
                 elif m.groups():
-                    # Last non-empty capture group is the secret value.
                     value = next((g for g in reversed(m.groups()) if g), "") or ""
                 else:
                     value = m.group(0)
-
                 if not _passes_entropy(value, rule):
                     continue
 
@@ -428,18 +211,16 @@ def detect_hardcoded_secrets(diff: str, *, file_sources: dict[str, str] | None =
                 description = (
                     f"A {rule.label} appears to be hardcoded directly in the diff. "
                     f"This is a confidentiality risk: anyone with repository access "
-                    f"can read and abuse the credential. Even if the value is a stub "
-                    f"in a fixture or test, leaking plausible-looking credentials can "
-                    f"still be dangerous and should be avoided."
+                    f"can read and abuse the credential. Even a stub in a fixture or "
+                    f"test is dangerous and should be avoided."
                 )
-                finding = _make_finding(rule, line, snippet, description)
-                _maybe_keep((value, line.file_path or "", line.line_no), finding)
+                _maybe_keep(
+                    (value, line.file_path or "", line.line_no),
+                    _make_finding(rule, line, snippet, description),
+                )
 
     if file_sources:
         for path, source in file_sources.items():
-            # Only scan full-source for PEM blocks (rare, expensive to regex
-            # line-by-line on huge files). Prefix rules already covered by
-            # scanning the diff; only catch private keys not present in diff.
             for rule in _KEYWORD_RULES:
                 if rule.id != "private_key_literal":
                     continue
@@ -450,14 +231,11 @@ def detect_hardcoded_secrets(diff: str, *, file_sources: dict[str, str] | None =
                         continue
                     seen_keys.add(dedup_key)
                     line_no = source.count("\n", 0, m.start()) + 1
-                    finding = _make_finding(
-                        rule,
-                        _Line(path, line_no, snippet),
-                        snippet,
+                    _maybe_keep((snippet, path, line_no), _make_finding(
+                        rule, _Line(path, line_no, snippet), snippet,
                         "A PEM private key block is embedded in this file. "
                         "Private keys must never live in source code.",
-                    )
-                    _maybe_keep((snippet, path, line_no), finding)
+                    ))
 
     findings = list(by_value.values())
     findings.sort(key=lambda f: (f.file_path or "", f.line_start or 0, f.title))

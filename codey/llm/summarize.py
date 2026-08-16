@@ -1,8 +1,4 @@
-"""Cheap/fast diff summarizer — used for large diffs before agent review.
-
-Summarizes a raw diff into a compact natural-language description suitable for
-inclusion in agent prompts, respecting the model's context budget.
-"""
+"""Cheap/fast diff summarizer — used for large diffs before agent review."""
 
 from __future__ import annotations
 
@@ -35,17 +31,10 @@ def summarize_diff(
     *,
     max_chars: int = 24_000,
 ) -> DiffSummary:
-    """Summarize a single file diff using the cheap/fast model.
-
-    If the diff is small enough it is left as-is (no LLM call).
-    """
     if len(diff_text) <= max_chars:
-        return DiffSummary(
-            path=path,
-            summary=diff_text,
-            token_estimate=estimate_tokens(diff_text),
-        )
-    truncated = diff_text[: max_chars * 2]  # leave room for long truncation
+        return DiffSummary(path=path, summary=diff_text, token_estimate=estimate_tokens(diff_text))
+
+    truncated = diff_text[: max_chars * 2]
     from langchain_core.messages import HumanMessage, SystemMessage
 
     try:
@@ -68,5 +57,4 @@ def summarize_diffs(
     *,
     max_chars: int = 24_000,
 ) -> list[DiffSummary]:
-    """Summarize a mapping of {path -> diff_text} into DiffSummary objects."""
     return [summarize_diff(summarizer, path, text, max_chars=max_chars) for path, text in diffs.items()]

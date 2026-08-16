@@ -1,24 +1,4 @@
-"""SecurityAgent — multi-tool security analysis with LLM synthesis.
-
-Runs (in order):
-1. A deterministic hardcoded-secret detector (no third-party dependency;
-   prefix rules + Shannon-entropy placeholder filtering). This is the
-   primary source of truth for *credential* leaks and the authoritative
-   fallback when the LLM is unavailable.
-2. Bandit (Python), semgrep (multi-language), gitleaks (secrets) — if
-   installed.
-3. An LLM pass that synthesises the tool outputs *and* specifically judges
-   *non-secret confidentiality leaks* that have no easy regex anchor —
-   sensitive PII, internal URLs/hostnames, account/record IDs, business-
-   confidential strings, debug/telemetry payloads, etc.
-
-Hardcoded-secret findings survive the LLM step: the LLM is told not to drop
-them and to add its own judgement on top.  If the LLM is absent, the
-hardcoded-secret findings are returned as-is.
-
-Skips file types that obviously don't affect security (css, md, images,
-fonts, etc.) for the external-tool stage; the diff is always reviewed.
-"""
+"""SecurityAgent — deterministic secret detection + external tools + LLM synthesis."""
 
 from __future__ import annotations
 
@@ -29,7 +9,15 @@ from pathlib import Path
 
 from codey.agents.context import ReviewContext
 from codey.agents.evidence import attach_evidence
-from codey.agents.schemas import AgentReport, Finding, FindingCategory, Severity
+from codey.agents.schemas import (
+    AgentReport,
+    Finding,
+    FindingCategory,
+    Severity,
+    llm_output_is_parseable,
+    parse_llm_findings,
+    strip_code_fences,
+)
 from codey.agents.secrets import detect_hardcoded_secrets
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
@@ -37,17 +25,16 @@ from codey.process import allowlist_env, scrubbed_env
 
 __all__ = ["run_security_agent"]
 
-# Files that obviously don't affect security. Deliberately does NOT skip
-# config/data files (.json/.yaml/.yml/.toml/.ini/.cfg/.env, HTML) — those are
-# exactly where credentials get committed, so they stay in scope for the
-# external scanners (and the diff-level secret detector always scans them).
+_llm_output_is_parseable = llm_output_is_parseable
+_strip_code_fences = strip_code_fences
+
+# Files that obviously don't affect security. Config/data files stay in scope
+# (.json/.yaml/.toml/.ini/.cfg/.env, HTML) — that's where credentials get committed.
 _SKIP_SUFFIXES = {
-    ".css", ".scss", ".sass", ".less",
-    ".md", ".rst",
+    ".css", ".scss", ".sass", ".less", ".md", ".rst",
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".bmp", ".webp",
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".pdf", ".zip", ".tar", ".gz", ".bz2",
-    ".lock",
+    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".lock",
 }
 _BANDIT_LANG = ".py"
 
@@ -56,71 +43,43 @@ def _should_skip(path: str) -> bool:
     return Path(path).suffix.lower() in _SKIP_SUFFIXES
 
 
+def _parse_llm_findings(text: str) -> tuple[list[Finding], str | None]:
+    return parse_llm_findings(text, FindingCategory.SECURITY)
+
+
 _SECURITY_SYSTEM = (
     "You are a senior security analyst. You review code changes for both "
-    "Classic application-security vulnerabilities AND confidentiality leaks.\n\n"
-    "Your scope is explicitly MORE than just hardcoded secrets — the "
-    "deterministic detector already handles credentials. You must also "
-    "JUDGE confidentiality leaks that have no easy regex anchor, such as:\n"
-    "  • PII — emails, phone numbers, addresses, national IDs, SSNs,\n"
-    "    account/record IDs, user/client names embedded in source.\n"
-    "  • Internal-only endpoints — internal hostnames, private IP ranges,\n"
-    "    staging/admin URLs, hidden feature flags, internal API paths.\n"
-    "  • Provider/account references — cloud account numbers, project IDs,\n"
-    "    resource ARNs, org/workspace IDs, customer IDs.\n"
-    "  • Crypto / auth mistakes — weak hashes (MD5/SHA1 for passwords),\n"
-    "    reused IVs, disabled TLS verification, hardcoded JWT secrets,\n"
-    "    insecure randomness, SQL string concatenation, command injection.\n"
-    "  • Logging/telemetry — secrets or PII written to logs/metrics, verbose\n"
-    "    error messages leaking stack/state, debug endpoints left enabled.\n"
-    "  • Any other disclosure that could harm users or the organisation.\n\n"
-    "For each genuine issue produce a structured finding with:\n"
-    "- category: security\n"
-    "- severity: critical/high/medium/low/info (calibrate honestly — "
-    "real secret EMERGENCY = critical; leaked PII = high/medium depending "
-    "on volume & sensitivity; risky pattern = medium/low)\n"
-    "- title: short description\n"
-    "- description: what the vulnerability is and why it matters\n"
-    "- file_path and line_start (from the tool output when available)\n"
-    "- evidence: VERBATIM copy of the relevant code line / tool output. "
-    "NEVER fabricate or paraphrase evidence. If you cannot quote the exact "
-    "text, do NOT emit the finding.\n"
-    "- recommendation: how to fix it\n"
-    "- confidence: 0.0-1.0\n\n"
-    "IMPORTANT rules:\n"
-    "  - You will be given a list of findings already produced by the "
-    "deterministic detector. Do NOT duplicate or downgrade them — they are "
-    "high-precision. You MAY keep them as-is in your output and add your own.\n"
+    "application-security vulnerabilities AND confidentiality leaks.\n\n"
+    "The deterministic detector already handles credentials; you must also "
+    "judge confidentiality leaks that have no easy regex anchor:\n"
+    "  • PII — emails, phones, addresses, national IDs, SSNs, account/record IDs,\n"
+    "    user/client names embedded in source.\n"
+    "  • Internal-only endpoints — hostnames, private IPs, staging/admin URLs,\n"
+    "    hidden flags, internal API paths.\n"
+    "  • Provider/account references — cloud account numbers, project IDs, ARNs.\n"
+    "  • Crypto/auth mistakes — weak hashes, reused IVs, disabled TLS verify,\n"
+    "    hardcoded JWT secrets, insecure randomness, SQL concat, command injection.\n"
+    "  • Logging/telemetry — secrets or PII in logs, verbose errors, debug endpoints.\n\n"
+    "For each genuine issue output a structured finding with: category=security,\n"
+    "severity (calibrate honestly), title, description, file_path, line_start,\n"
+    "evidence (VERBATIM copy of the code/tool line — never fabricate; if you cannot\n"
+    "quote it, do NOT emit the finding), recommendation, confidence (0.0-1.0).\n\n"
+    "Rules:\n"
+    "  - You are given findings already produced by the deterministic detector.\n"
+    "    Do NOT duplicate or downgrade them — they are high-precision. Keep them\n"
+    "    as-is in your output and add your own.\n"
     "  - Only report genuine issues grounded in the provided data. Deduplicate.\n"
     "  - If there are no issues, output an empty array [].\n"
-    "  - Output ONLY a JSON array of finding objects — no commentary, no "
-    "markdown fences."
+    "  - Output ONLY a JSON array of finding objects — no commentary, no fences."
 )
 
 
-def run_security_agent(
-    ctx: ReviewContext,
-    db=None,
-    llm: object | None = None,
-) -> AgentReport:
-    """Run security scanners and synthesise results into an AgentReport.
-
-    Pipeline:
-      1. ``detect_hardcoded_secrets`` (deterministic, no external deps) on
-         the diff + optional full file sources — the authoritative source
-         for credential leaks AND the guaranteed fallback when the LLM is
-         unavailable.
-      2. bandit / semgrep / gitleaks — if installed.
-      3. LLM synthesis that ingests the hardcoded-secret findings AND the
-         tool outputs AND the diff, and is explicitly asked to add its own
-         *confidentiality-judgement* findings beyond secrets.
-    """
+def run_security_agent(ctx: ReviewContext, db=None, llm: object | None = None) -> AgentReport:
     repo = ctx.repo_path
     py_files = [p for p in ctx.changed_files if Path(p).suffix == _BANDIT_LANG]
     all_relevant = [p for p in ctx.changed_files if not _should_skip(p)]
 
-    # 1. Deterministic hardcoded-secret detection (always runs). Scans the
-    #    RAW diff (pre-summarisation) so LLM summaries can't hide secrets.
+    # 1. Deterministic hardcoded-secret detection (always runs, on the RAW diff).
     hardcoded = detect_hardcoded_secrets(ctx.raw_full_diff or ctx.full_diff, file_sources=ctx.file_sources)
     hardcoded_titles = {f.title for f in hardcoded}
 
@@ -146,55 +105,30 @@ def run_security_agent(
         tool_findings.extend(_parse_tool_results(src, raw_results[src]))
 
     token_usage = 0
-    report_error: str | None = None
-    if tool_errors:
-        report_error = "; ".join(tool_errors)
+    report_error: str | None = "; ".join(tool_errors) or None
 
-    # 3. LLM judgement. The LLM always reviews the diff (when available) —
-    #    even if no tool flagged anything — so non-secret confidentiality
-    #    leaks get judged.  Hardcoded-secret findings are merged *after* and
-    #    survive LLM output (only an LLM finding that exactly matches a
-    #    hardcoded one is dropped, to avoid duplicates).
-    llm_findings: list[Finding] = []
+    # 3. LLM judgement (always reviews the diff). Hardcoded findings merge after
+    #    and survive LLM output — only an LLM finding whose title collides is dropped.
+    llm_kept: list[Finding] = []
     if llm is not None:
         synthesised, _usage, synth_error = _llm_synthesise(
-            llm,
-            raw_results,
-            ctx.full_diff,
-            ctx.changed_files,
-            hardcoded_findings=hardcoded,
+            llm, raw_results, ctx.full_diff, ctx.changed_files, hardcoded_findings=hardcoded,
         )
         token_usage = _usage
         if synth_error is not None:
             report_error = (report_error + "; " if report_error else "") + synth_error
         else:
-            # Parse defensively: a single malformed field (e.g. "severity":
-            # null) must never wipe out the deterministic hardcoded-secret
-            # findings already computed — bad items are skipped, the rest
-            # parse, and the error is recorded.
             llm_findings, parse_error = _parse_llm_findings(synthesised)
             if parse_error:
                 report_error = (report_error + "; " if report_error else "") + parse_error
             elif not _llm_output_is_parseable(synthesised):
-                report_error = (
-                    (report_error + "; " if report_error else "")
-                    + "LLM returned unparseable output (expected a JSON array of findings)"
+                report_error = (report_error + "; " if report_error else "") + (
+                    "LLM returned unparseable output (expected a JSON array of findings)"
                 )
+            llm_kept = [f for f in llm_findings if f.title not in hardcoded_titles]
 
-    # Merge: LLM findings first (broader confidentiality judgement), then
-    # tool findings, then hardcoded-secret findings — dropping any LLM/tool
-    # finding whose title collides with a hardcoded finding.
-    llm_kept: list[Finding] = []
-    findings: list[Finding] = []
-    for f in llm_findings:
-        if f.title in hardcoded_titles:
-            continue
-        llm_kept.append(f)
-        findings.append(f)
-    for f in tool_findings:
-        if f.title in hardcoded_titles:
-            continue
-        findings.append(f)
+    findings: list[Finding] = list(llm_kept)
+    findings.extend(f for f in tool_findings if f.title not in hardcoded_titles)
     findings.extend(hardcoded)
 
     if not findings and report_error is None:
@@ -204,28 +138,22 @@ def run_security_agent(
             severity=Severity.INFO,
             title="No security issues found",
             description=(
-                f"No security vulnerabilities detected by the hardcoded-secret "
-                f"detector, automated tools, or LLM review. "
-                f"Scanned {len(all_relevant)} relevant file(s); hardcode check "
-                f"examined the full diff."
+                f"No vulnerabilities detected by the hardcoded-secret detector, "
+                f"automated tools, or LLM review. Scanned {len(all_relevant)} relevant "
+                f"file(s); hardcode check examined the full diff."
             ),
             evidence=tool_evidence,
             confidence=0.8,
         ))
 
-    # Attach verbatim diff evidence to any LLM findings that lack it, then
-    # ENFORCE the verbatim rule per-finding (identity, not title — two
-    # findings sharing a title are judged independently): LLM findings that
-    # still have no evidence are discarded (the system prompt promises this).
+    # Attach verbatim diff evidence, then ENFORCE the verbatim rule: LLM findings
+    # that still have no evidence are discarded (the system prompt promises this).
     attach_evidence(findings, ctx)
     if llm_kept:
-        llm_with_evidence = {id(f) for f in llm_kept if f.evidence.strip()}
-        findings = [
-            f for f in findings
-            if id(f) not in {id(x) for x in llm_kept} or id(f) in llm_with_evidence
-        ]
+        kept_ids = {id(f) for f in llm_kept if f.evidence.strip()}
+        findings = [f for f in findings if id(f) not in {id(x) for x in llm_kept} or id(f) in kept_ids]
 
-    tools_used = [k for k in raw_results] or ["no external security tools"]
+    tools_used = list(raw_results) or ["no external security tools"]
     finding_details = "; ".join(
         f"{f.title} [{f.severity.value}]"
         + (f" at {f.file_path}:{f.line_start}" if f.file_path else "")
@@ -263,27 +191,17 @@ def run_security_agent(
 
 
 def _run_bandit(repo: Path, py_files: list[str]) -> tuple[str, str | None]:
-    """Run bandit; returns (stdout, error_note).
-
-    Returncodes 0/1 (clean / issues found) are normal output; 2/3 mean bandit
-    itself failed (config error, unparseable file) — that's surfaced as an
-    error note instead of being silently treated as 'no findings'.
-    """
-    if not py_files:
-        return "", None
-    if not shutil.which("bandit"):
+    if not py_files or not shutil.which("bandit"):
         return "", None
     try:
-        # '--' separates options from file paths so repo filenames that begin
-        # with '-' can't be interpreted as flags.
         cmd = ["bandit", "-f", "json", "-q", "--"] + py_files
         proc = subprocess.run(
             cmd, cwd=str(repo), capture_output=True, text=True, timeout=60, check=False,
             env=scrubbed_env(),
         )
-        if proc.returncode in (0, 1):  # 1 = issues found, still valid output
+        if proc.returncode in (0, 1):
             return proc.stdout, None
-        if proc.returncode in (2, 3):  # fatal — surface, don't fake-clean
+        if proc.returncode in (2, 3):
             return "", (proc.stderr.strip() or "bandit exited fatally")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -296,9 +214,10 @@ def _parse_bandit_json(raw: str) -> list[Finding]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return findings
+    sev_map = {"LOW": Severity.LOW, "MEDIUM": Severity.MEDIUM, "HIGH": Severity.HIGH}
+    conf_map = {"LOW": 0.3, "MEDIUM": 0.6, "HIGH": 0.9}
     for r in data.get("results", []):
-        sev_map = {"LOW": Severity.LOW, "MEDIUM": Severity.MEDIUM, "HIGH": Severity.HIGH}
-        conf_map = {"LOW": 0.3, "MEDIUM": 0.6, "HIGH": 0.9}
+        cwe = r.get("issue_cwe", {})
         findings.append(Finding(
             category=FindingCategory.SECURITY,
             severity=sev_map.get(r.get("issue_severity", ""), Severity.MEDIUM),
@@ -307,7 +226,7 @@ def _parse_bandit_json(raw: str) -> list[Finding]:
             file_path=r.get("filename"),
             line_start=r.get("line_number"),
             evidence=r.get("code", ""),
-            recommendation=r.get("issue_cwe", {}).get("link", "") if isinstance(r.get("issue_cwe"), dict) else "",
+            recommendation=cwe.get("link", "") if isinstance(cwe, dict) else "",
             confidence=conf_map.get(r.get("issue_confidence", ""), 0.5),
         ))
     return findings
@@ -317,21 +236,10 @@ def _parse_bandit_json(raw: str) -> list[Finding]:
 
 
 def _run_semgrep(repo: Path, files: list[str]) -> tuple[str | None, str | None]:
-    """Run semgrep; returns (stdout, error_note).
-
-    Scans ALL given files — no silent 50-file cap. Returncodes 0/1 are
-    normal; other codes are surfaced as an error note.
-    """
-    if not shutil.which("semgrep"):
-        return None, None
-    if not files:
+    if not shutil.which("semgrep") or not files:
         return None, None
     try:
-        # '--' separates options from file paths so repo filenames that begin
-        # with '-' can't be interpreted as flags.
-        cmd = ["semgrep", "--json", "--quiet", "--no-rewrite-rule-ids", "--"]
-        # scan changed paths
-        cmd.extend(files)
+        cmd = ["semgrep", "--json", "--quiet", "--no-rewrite-rule-ids", "--"] + files
         proc = subprocess.run(
             cmd, cwd=str(repo), capture_output=True, text=True, timeout=90, check=False,
             env=scrubbed_env(),
@@ -351,15 +259,12 @@ def _parse_semgrep_json(raw: str) -> list[Finding]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return findings
+    sev_map = {"INFO": Severity.INFO, "WARNING": Severity.MEDIUM, "ERROR": Severity.HIGH}
     for r in data.get("results", []):
-        sev = Severity.MEDIUM
         extra = r.get("extra", {})
-        sev_str = extra.get("severity", "").upper()
-        sev_map = {"INFO": Severity.INFO, "WARNING": Severity.MEDIUM, "ERROR": Severity.HIGH}
-        sev = sev_map.get(sev_str, sev)
         findings.append(Finding(
             category=FindingCategory.SECURITY,
-            severity=sev,
+            severity=sev_map.get(extra.get("severity", "").upper(), Severity.MEDIUM),
             title=f"[semgrep] {r.get('check_id', '')}",
             description=extra.get("message", ""),
             file_path=r.get("path"),
@@ -379,24 +284,14 @@ def _run_gitleaks(repo: Path, *, commit: str = "HEAD") -> str | None:
     if not shutil.which("gitleaks"):
         return None
     try:
-        # Scan only the commit under review (diff vs its parent), not the
-        # entire working tree — pre-existing secrets in unrelated files must
-        # not be attributed to this review. Root commits (no parent) fall
-        # back to scanning just that commit.
-        import subprocess as _sp
-
-        parent_check = _sp.run(
+        parent_check = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"{commit}~1"],
             cwd=str(repo), capture_output=True, text=True, timeout=15, check=False,
             env=allowlist_env(),
         )
-        if parent_check.returncode == 0:
-            log_opts = f"{commit}~1..{commit}"
-        else:
-            log_opts = commit  # root commit: scan the commit itself
+        log_opts = f"{commit}~1..{commit}" if parent_check.returncode == 0 else commit
         proc = subprocess.run(
-            ["gitleaks", "detect", "--source", str(repo),
-             "--log-opts", log_opts,
+            ["gitleaks", "detect", "--source", str(repo), "--log-opts", log_opts,
              "--report-format", "json", "--report-path", "-"],
             cwd=str(repo), capture_output=True, text=True, timeout=60, check=False,
             env=scrubbed_env(),
@@ -415,6 +310,7 @@ def _parse_gitleaks_json(raw: str) -> list[Finding]:
     except json.JSONDecodeError:
         return findings
     for r in data:
+        secret = r.get("Secret", "")
         findings.append(Finding(
             category=FindingCategory.SECURITY,
             severity=Severity.CRITICAL,
@@ -423,46 +319,28 @@ def _parse_gitleaks_json(raw: str) -> list[Finding]:
             file_path=r.get("File"),
             line_start=r.get("StartLine"),
             line_end=r.get("EndLine"),
-            evidence=r.get("Secret", "")[:100] + "..." if r.get("Secret") else "",
+            evidence=secret[:100] + "..." if secret else "",
             recommendation="Remove the secret and rotate it immediately via env vars or a secrets manager.",
             confidence=0.9,
         ))
     return findings
 
 
-# --- Tool result dispatcher ----
-
-
 def _parse_tool_results(source: str, raw: str) -> list[Finding]:
-    if source == "bandit":
-        return _parse_bandit_json(raw)
-    elif source == "semgrep":
-        return _parse_semgrep_json(raw)
-    elif source == "gitleaks":
-        return _parse_gitleaks_json(raw)
-    return []
+    parsers = {"bandit": _parse_bandit_json, "semgrep": _parse_semgrep_json, "gitleaks": _parse_gitleaks_json}
+    return parsers[source](raw) if source in parsers else []
 
 
 # --- LLM synthesis ----
 
 
 def _hardcoded_summary(hardcoded: list[Finding]) -> str:
-    """Render the deterministic-secret findings as plain text for the LLM.
-
-    The LLM is instructed (via the system prompt) not to drop or downgrade
-    these — they are high-precision.  We surface them so the LLM doesn't
-    have to re-derive them from the raw diff, which both saves tokens and
-    keeps the final list consistent.
-    """
     if not hardcoded:
         return "(none)"
     out = []
     for i, f in enumerate(hardcoded, 1):
         loc = f"{f.file_path}:{f.line_start}" if f.file_path else "unknown"
-        out.append(
-            f"  {i}. [{f.severity.value.upper()}] {f.title} @ {loc}\n"
-            f"     evidence: {f.evidence}"
-        )
+        out.append(f"  {i}. [{f.severity.value.upper()}] {f.title} @ {loc}\n     evidence: {f.evidence}")
     return "\n".join(out)
 
 
@@ -474,19 +352,8 @@ def _llm_synthesise(
     *,
     hardcoded_findings: list[Finding] | None = None,
 ) -> tuple[str, int, str | None]:
-    """Ask the LLM to merge tool outputs + hardcoded-secret findings and
-    ADD its own confidentiality-judgement findings for issues that have no
-    easy regex anchor (PII, internal endpoints, crypto/auth mistakes, etc.).
-
-    The LLM always reviews the diff — regardless of whether bandit/semgrep/
-    gitleaks produced output — so confidential-info leaks are judged, not
-    just secrets.
-
-    Returns ``(text, token_usage, error)`` where ``error`` is set when the
-    LLM call itself failed (rate limit exhausted, provider error, timeout).
-    Unparseable output is *not* treated as an error here — the caller
-    distinguishes it after parsing.
-    """
+    """Returns ``(text, token_usage, error)``. Unparseable output is *not* an
+    error here — the caller distinguishes it after parsing."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
     raw_text = "\n\n".join(f"=== {k} ===\n{v[:5000]}" for k, v in raw_results.items()) or "(no external tool output)"
@@ -515,73 +382,9 @@ def _llm_synthesise(
 
 
 def _diff_truncated_note(diff: str) -> str:
-    """Human-readable note when the LLM diff excerpt was truncated."""
     if diff and len(diff) > 8000:
         return (
             f"LLM diff excerpt truncated to first 8000 chars of {len(diff)} "
             "(full raw diff scanned by the deterministic detector)."
         )
     return ""
-
-
-def _parse_llm_findings(text: str) -> tuple[list[Finding], str | None]:
-    """Parse LLM JSON output into Finding objects, defensively.
-
-    Returns ``(findings, error)`` where ``error`` is set when individual
-    items were malformed (e.g. ``"severity": null`` — a value that would
-    otherwise crash ``Severity(...).lower()``). Malformed items are SKIPPED,
-    valid ones are kept — a single bad field never wipes the whole report.
-    Unparseable top-level JSON yields ``([], None)`` (the caller checks
-    :func:`_llm_output_is_parseable` separately).
-    """
-    stripped = _strip_code_fences(text)
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        return [], None
-    if not isinstance(data, list):
-        return [], "LLM output was not a JSON array"
-    findings: list[Finding] = []
-    malformed = 0
-    for item in data:
-        try:
-            sev_raw = item.get("severity", "info")
-            if sev_raw is None:
-                raise ValueError("severity is null")
-            sev = Severity(str(sev_raw).lower())
-            conf_raw = item.get("confidence", 0.7)
-            conf = float(conf_raw) if conf_raw is not None else 0.7
-            findings.append(Finding(
-                category=FindingCategory.SECURITY,
-                severity=sev,
-                title=item.get("title", ""),
-                description=item.get("description", ""),
-                file_path=item.get("file_path"),
-                line_start=item.get("line_start"),
-                line_end=item.get("line_end"),
-                evidence=item.get("evidence", ""),
-                recommendation=item.get("recommendation", ""),
-                confidence=conf,
-            ))
-        except (ValueError, TypeError):
-            malformed += 1
-    error = f"{malformed} malformed LLM finding(s) skipped" if malformed else None
-    return findings, error
-
-
-def _llm_output_is_parseable(text: str) -> bool:
-    """True when *text* parses as a JSON array (possibly empty)."""
-    try:
-        json.loads(_strip_code_fences(text))
-        return True
-    except json.JSONDecodeError:
-        return False
-
-
-def _strip_code_fences(text: str) -> str:
-    """Remove an enclosing markdown ``` code fence, if present."""
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.split("\n")
-        stripped = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-    return stripped

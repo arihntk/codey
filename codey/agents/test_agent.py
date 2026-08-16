@@ -1,10 +1,4 @@
-"""TestAgent — identifies and executes the test suite for changed code.
-
-Detects test framework via config files (pytest.ini, pyproject.toml, package.json,
-etc.) and runs the relevant commands. Skips if no concrete test command can be
-identified. Optionally asks the LLM to determine which specific tests to run
-based on the changed files.
-"""
+"""TestAgent — identifies and (opt-in) executes the test suite for changed code."""
 
 from __future__ import annotations
 
@@ -30,48 +24,32 @@ _TEST_CONFIGS = {
         ("setup.cfg", ["pytest", "-x", "--tb=short"]),
         ("tox.ini", ["pytest", "-x", "--tb=short"]),
     ],
-    "unittest": [
-        ("conftest.py", ["python", "-m", "pytest", "-x", "--tb=short"]),
-    ],
-    "npm": [
-        ("package.json", ["npm", "test"]),
-    ],
-    "go": [
-        ("go.mod", ["go", "test", "./..."]),
-    ],
-    "cargo": [
-        ("Cargo.toml", ["cargo", "test"]),
-    ],
-    "rake": [
-        ("Rakefile", ["rake", "test"]),
-    ],
+    "unittest": [("conftest.py", ["python", "-m", "pytest", "-x", "--tb=short"])],
+    "npm": [("package.json", ["npm", "test"])],
+    "go": [("go.mod", ["go", "test", "./..."])],
+    "cargo": [("Cargo.toml", ["cargo", "test"])],
+    "rake": [("Rakefile", ["rake", "test"])],
 }
 
 
 def _detect_frameworks(repo: Path) -> list[tuple[str, list[str]]]:
-    """Return a list of (framework_name, test_command) pairs detected in the repo."""
-
     detected: list[tuple[str, list[str]]] = []
     for framework, configs in _TEST_CONFIGS.items():
         for config_file, cmd in configs:
             target = repo / config_file
-            if target.is_file():
-                # For pyproject.toml, verify pytest is actually configured.
-                if config_file == "pyproject.toml":
-                    content = target.read_text(encoding="utf-8", errors="replace")
-                    if "[tool.pytest" not in content and "pytest" not in content:
-                        continue
-                detected.append((framework, cmd))
-                break
+            if not target.is_file():
+                continue
+            if config_file == "pyproject.toml":
+                content = target.read_text(encoding="utf-8", errors="replace")
+                if "[tool.pytest" not in content and "pytest" not in content:
+                    continue
+            detected.append((framework, cmd))
+            break
 
-    # Fallback: if there's a tests/ directory and pytest is available.
     if not detected and (
-        any((repo / "tests").glob("test_*.py"))
-        or any((repo / "test").glob("test_*.py"))
-    ):
-        if shutil.which("pytest"):
-            detected.append(("pytest", ["pytest", "-x", "--tb=short"]))
-
+        any((repo / "tests").glob("test_*.py")) or any((repo / "test").glob("test_*.py"))
+    ) and shutil.which("pytest"):
+        detected.append(("pytest", ["pytest", "-x", "--tb=short"]))
     return detected
 
 
@@ -80,21 +58,13 @@ def _binary_available(cmd: list[str]) -> bool:
 
 
 def _run_tests(repo: Path, command: list[str]) -> tuple[bool, str, str]:
-    """Run a test command and return (success, stdout, stderr)."""
-
     if not _binary_available(command):
         return False, "", f"'{command[0]}' not found in PATH"
     try:
         proc = subprocess.run(
-            command,
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=_TEST_RUN_TIMEOUT,
-            check=False,
-            # Test commands execute code from the repo under review — give
-            # them only an allowlisted environment so credentials can't be
-            # exfiltrated by a malicious test suite.
+            command, cwd=str(repo), capture_output=True, text=True,
+            timeout=_TEST_RUN_TIMEOUT, check=False,
+            # Only an allowlisted env — test commands run repo code.
             env=allowlist_env(),
         )
         return proc.returncode == 0, proc.stdout[:20_000], proc.stderr[:20_000]
@@ -104,47 +74,27 @@ def _run_tests(repo: Path, command: list[str]) -> tuple[bool, str, str]:
         return False, "", str(e)
 
 
-def run_test_agent(
-    ctx: ReviewContext,
-    db=None,
-    llm: object | None = None,
-) -> AgentReport:
-    """Identify and run tests for the changed code.
-
-    IMPORTANT: test commands are executed ONLY when ``ctx.run_tests`` is
-    True (set via ``codey review --run-tests`` after an explicit
-    confirmation). Running ``npm test`` / ``go test ./...`` on a repository
-    being reviewed executes code from that repository — reviewing untrusted
-    code must never trigger build/test script execution implicitly.
-    """
-
+def run_test_agent(ctx: ReviewContext, db=None, llm: object | None = None) -> AgentReport:
+    """Test commands execute ONLY when ``ctx.run_tests`` is True (explicit opt-in)."""
     if not ctx.run_tests:
         return AgentReport(
             agent="test",
             status="skipped",
-            summary=(
-                "Test execution disabled. Re-run with `codey review --run-tests` "
-                "(and confirm the prompt) to execute the detected test commands."
-            ),
-            findings=[
-                Finding(
-                    category=FindingCategory.TESTING,
-                    severity=Severity.INFO,
-                    title="Test execution skipped (opt-in)",
-                    description=(
-                        "Test commands are not executed by default because they "
-                        "run code from the repository under review. Enable with "
-                        "`codey review --run-tests` after confirming the command "
-                        "list is safe."
-                    ),
-                    confidence=1.0,
-                )
-            ],
+            summary="Test execution disabled. Re-run with `codey review --run-tests` (and confirm the prompt).",
+            findings=[Finding(
+                category=FindingCategory.TESTING,
+                severity=Severity.INFO,
+                title="Test execution skipped (opt-in)",
+                description=(
+                    "Test commands are not executed by default because they run code "
+                    "from the repository under review. Enable with `codey review --run-tests`."
+                ),
+                confidence=1.0,
+            )],
         )
 
     repo = ctx.repo_path
     frameworks = _detect_frameworks(repo)
-
     findings: list[Finding] = []
     metadata: dict[str, str] = {}
     token_usage = 0
@@ -161,22 +111,16 @@ def run_test_agent(
             ),
             confidence=0.9,
         ))
-        return AgentReport(
-            agent="test",
-            status="skipped",
-            summary="No test suite detected — test execution skipped.",
-            findings=findings,
-            metadata={},
-        )
+        return AgentReport(agent="test", status="skipped",
+                           summary="No test suite detected — test execution skipped.",
+                           findings=findings, metadata={})
 
-    # Use LLM to narrow test scope if available.
     test_targets: list[str] = []
     report_error: str | None = None
     if llm is not None and ctx.changed_files:
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
 
-            changed = ", ".join(ctx.changed_files[:20])
             response = invoke_with_retry(llm, [
                 SystemMessage(content=(
                     "You are a test expert. Given the files changed in a commit, "
@@ -184,7 +128,10 @@ def run_test_agent(
                     "Output a JSON array of test path strings relative to repo root. "
                     "If unsure, output an empty array to run the full suite."
                 )),
-                HumanMessage(content=f"Changed files: {changed}\n\nRepository root: {repo.name}"),
+                HumanMessage(content=(
+                    f"Changed files: {', '.join(ctx.changed_files[:20])}\n\n"
+                    f"Repository root: {repo.name}"
+                )),
             ])
             raw = extract_text(response)
             text = raw.strip()
@@ -219,25 +166,24 @@ def run_test_agent(
                 confidence=1.0,
             ))
         else:
-            error_snippet = stderr or stdout or "No output captured."
             findings.append(Finding(
                 category=FindingCategory.TESTING,
                 severity=Severity.HIGH,
                 title=f"Tests failed ({framework})",
                 description=f"Test command '{' '.join(full_cmd)}' returned non-zero exit.",
-                evidence=error_snippet[:2000],
+                evidence=(stderr or stdout or "No output captured.")[:2000],
                 recommendation="Fix the failing tests before merging.",
                 confidence=0.9,
             ))
 
     passed = sum(1 for f in findings if f.severity == Severity.INFO)
     failed = len(findings) - passed
-    framework_names = ", ".join(fw for fw, _ in frameworks)
-    summary = f"Ran {len(frameworks)} test framework(s) [{framework_names}]. {passed} passed, {failed} failed."
+    summary = (
+        f"Ran {len(frameworks)} test framework(s) "
+        f"[{', '.join(fw for fw, _ in frameworks)}]. {passed} passed, {failed} failed."
+    )
     if failed:
-        failed_details = "; ".join(
-            f.title for f in findings if f.severity == Severity.HIGH
-        )
+        failed_details = "; ".join(f.title for f in findings if f.severity == Severity.HIGH)
         if failed_details:
             summary += f" Failures: {failed_details}."
     if report_error is not None:

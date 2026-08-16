@@ -1,7 +1,4 @@
-"""Progress event emitter for live terminal updates during review.
-
-Subscribes to LangGraph stream events and prints rich Status/Progress lines.
-"""
+"""Progress event emitter for live terminal updates during review."""
 
 from __future__ import annotations
 
@@ -11,7 +8,6 @@ from rich.console import Console
 
 __all__ = ["ProgressEmitter", "make_callback"]
 
-# Fallback labels (used before the graph registry is populated).
 _FALLBACK_LABELS: dict[str, str] = {
     "index": "Indexing repository",
     "security": "Running security analysis",
@@ -22,7 +18,6 @@ _FALLBACK_LABELS: dict[str, str] = {
 
 
 def _agent_labels() -> dict[str, str]:
-    """Labels from the agent registry when populated, else fallback."""
     try:
         from codey.graph.registry import get_specs
 
@@ -35,8 +30,6 @@ def _agent_labels() -> dict[str, str]:
 
 
 class ProgressEmitter:
-    """Emits progress updates to the terminal using rich."""
-
     def __init__(self, console: Console | None = None, *, enabled: bool = True) -> None:
         self.console = console or Console(stderr=True)
         self.enabled = enabled
@@ -47,12 +40,12 @@ class ProgressEmitter:
             self.console.print(f"[{style}]›[/] {message}")
 
     def emit_agent_start(self, agent: str) -> None:
-        label = _agent_labels().get(agent, agent)
-        self.emit(label + "...", style="cyan")
+        self.emit(_agent_labels().get(agent, agent) + "...", style="cyan")
 
     def emit_agent_done(self, agent: str, *, findings: int, status: str = "completed") -> None:
         label = _agent_labels().get(agent, agent)
-        self.emit(f"{label}: {status} ({findings} finding(s))", style="green" if status == "completed" else "yellow")
+        self.emit(f"{label}: {status} ({findings} finding(s))",
+                  style="green" if status == "completed" else "yellow")
 
     def emit_error(self, agent: str, error: str) -> None:
         self.emit(f"{agent} error: {error}", style="red")
@@ -62,8 +55,6 @@ class ProgressEmitter:
 
 
 def make_callback(emitter: ProgressEmitter):
-    """Create a stream callback suitable for graph.stream()."""
-
     def callback(chunk: dict[str, Any]) -> None:
         labels = _agent_labels()
         for node_name, node_state in chunk.items():
@@ -71,8 +62,7 @@ def make_callback(emitter: ProgressEmitter):
                 emitter.emit_agent_start("codey")
             elif node_name in labels:
                 emitter.emit_agent_start(node_name)
-                reports = node_state.get("agent_reports", {})
-                report = reports.get(node_name)
+                report = node_state.get("agent_reports", {}).get(node_name)
                 if report:
                     emitter.emit_agent_done(node_name, findings=len(report.findings), status=report.status)
 

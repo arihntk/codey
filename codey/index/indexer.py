@@ -1,13 +1,4 @@
-"""Repository indexer — parses source files and caches AST/symbol metadata.
-
-Uses ``git ls-files`` when in a git repo to respect .gitignore; falls back
-to a directory walk with basic ignore patterns for non-git trees.
-
-Git-hash diffing: on each run the indexer computes the current HEAD hash.
-If that hash is already indexed, it no-ops. Otherwise it reuses unchanged
-file entries from the last indexed hash (by content hash) and only
-re-parses files whose content has changed.
-"""
+"""Repository indexer — parses source files and caches AST/symbol metadata."""
 
 from __future__ import annotations
 
@@ -26,20 +17,16 @@ from codey.process import allowlist_env
 
 __all__ = ["IndexResult", "index_repository", "git_head_hash", "list_repo_files"]
 
-# Patterns to skip when walking without git.
 _DEFAULT_IGNORE_DIRS = {
     ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__",
     "node_modules", ".mypy_cache", ".ruff_cache", ".pytest_cache",
-    "dist", "build", ".eggs", ".tox", ".cache", "htmlcov", ".idea",
-    ".vscode",
+    "dist", "build", ".eggs", ".tox", ".cache", "htmlcov", ".idea", ".vscode",
 }
 _DEFAULT_IGNORE_SUFFIXES = {".pyc", ".pyo", ".so", ".o", ".a", ".dylib", ".class"}
 
 
 @dataclass
 class IndexResult:
-    """Summary of an indexing run."""
-
     git_hash: str
     total_files: int = 0
     parsed_files: int = 0
@@ -50,20 +37,11 @@ class IndexResult:
 
 
 def git_head_hash(repo_path: Path | str) -> str | None:
-    """Return the current HEAD commit hash, or None if not a git repo.
-
-    Runs with an allowlisted env: git may execute repo-supplied config hooks
-    (core.fsmonitor, pager, filters) that must never see credentials.
-    """
+    """Current HEAD hash, or None if not a git repo (allowlisted env)."""
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=allowlist_env(),
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_path), capture_output=True,
+            text=True, timeout=10, check=False, env=allowlist_env(),
         )
         if proc.returncode == 0:
             return proc.stdout.strip()
@@ -73,26 +51,16 @@ def git_head_hash(repo_path: Path | str) -> str | None:
 
 
 def list_repo_files(repo_path: Path) -> list[Path]:
-    """List all source files in the repo, respecting .gitignore via git ls-files.
-
-    Allowlisted env: git config (core.fsmonitor etc.) can run repo-supplied
-    commands during ls-files.
-    """
+    """List source files, respecting .gitignore via ``git ls-files`` (allowlisted env)."""
     try:
         proc = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-            cwd=str(repo_path),
-            capture_output=True,
-            text=False,
-            timeout=30,
-            check=False,
-            env=allowlist_env(),
+            cwd=str(repo_path), capture_output=True, timeout=30, check=False, env=allowlist_env(),
         )
         if proc.returncode == 0:
             files = [
                 (repo_path / f.decode("utf-8", errors="replace")).resolve()
-                for f in proc.stdout.split(b"\x00")
-                if f.strip()
+                for f in proc.stdout.split(b"\x00") if f.strip()
             ]
             return [f for f in files if f.is_file()]
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -101,7 +69,6 @@ def list_repo_files(repo_path: Path) -> list[Path]:
 
 
 def _walk_files(repo_path: Path) -> list[Path]:
-    """Fallback: walk directory tree without git."""
     results: list[Path] = []
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = [d for d in dirs if d not in _DEFAULT_IGNORE_DIRS]
@@ -117,15 +84,13 @@ def _content_hash(content: str) -> str:
 
 
 def _parse_file(path: Path, language: str) -> tuple[list[SymbolRecord], int]:
-    """Parse a single file, returning (symbols, byte_count)."""
     raw = path.read_bytes()
     try:
         parser = get_parser(language)
         tree = parser.parse(raw)
     except Exception:
         return [], len(raw)
-    symbols = extract_symbols(tree, str(path.name), language)
-    return symbols, len(raw)
+    return extract_symbols(tree, str(path.name), language), len(raw)
 
 
 def index_repository(
@@ -135,20 +100,10 @@ def index_repository(
     force: bool = False,
     cache_repo_path: Path | str | None = None,
 ) -> IndexResult:
-    """Index a repository, reusing cached entries for unchanged files.
+    """Index a repo, reusing cached entries for unchanged files.
 
-    Args:
-        repo_path: Absolute path to the repo root (used for file reads).
-        db: Open CacheDB instance.
-        force: If True, re-parse all files even if hash is unchanged.
-        cache_repo_path: Canonical repo path used as the cache key. When the
-            repo being indexed lives in a temporary worktree (non-HEAD
-            reviews), pass the real repo here so cache entries are keyed
-            canonically and reused across runs instead of accumulating rows
-            for deleted tmpdir paths.
-
-    Returns:
-        IndexResult with counts and changed file list.
+    ``cache_repo_path`` is the canonical repo used as the cache key when
+    ``repo_path`` is a temporary worktree (non-HEAD reviews).
     """
     repo = Path(repo_path).resolve()
     cache_key = str(Path(cache_repo_path or repo).resolve())
@@ -188,12 +143,8 @@ def index_repository(
 
         if not force and last_hashes.get(rel) == chash and db.get_file_entry(cache_key, last_hash, rel):
             result.reused_files += 1
-            # Reuse the file entry AND symbols under the new hash, otherwise
-            # file_entry_hashes(new_hash) never contains this file and it gets
-            # re-parsed on every subsequent commit (cache thrash).
             old_entry = db.get_file_entry(cache_key, last_hash, rel)
             if old_entry is None:
-                # Explicit raise, not an assert — asserts vanish under -O.
                 raise RuntimeError(
                     f"cache inconsistency: {rel} hashed equal under {last_hash} "
                     f"but its file entry is missing"
@@ -209,13 +160,7 @@ def index_repository(
         result.changed_files.append(rel)
 
         symbols, byte_count = _parse_file(fpath, language)
-        entry = FileEntry(
-            rel_path=rel,
-            language=language,
-            content_hash=chash,
-            mtime=fpath.stat().st_mtime,
-            byte_count=byte_count,
-        )
+        entry = FileEntry(rel, language, chash, fpath.stat().st_mtime, byte_count)
         db.upsert_file_entry(cache_key, head_hash, entry)
         if symbols:
             db.bulk_upsert_symbols(cache_key, head_hash, symbols)

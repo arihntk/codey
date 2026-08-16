@@ -1,11 +1,10 @@
-"""Codey CLI — typer-based commands for the multi-agent AI code review system.
+"""Codey CLI — typer commands for the multi-agent AI code review system.
 
-\\b
-  codey set                  Configure provider & API key (OpenAI/Anthropic/DeepSeek/Google/Custom)
+  codey set                  Configure provider & API key
   codey unset  [PROVIDER]    Remove a provider's API key & configuration
   codey model                 View or switch the active model
   codey config                Show current configuration
-  codey graph                 View the indexed code graph (symbols, calls, imports)
+  codey graph                 View the indexed code graph
   codey review                Review the latest commit (HEAD~1..HEAD)
   codey review <commit>       Review a specific commit (hash/branch/tag)
 """
@@ -51,8 +50,6 @@ app = typer.Typer(
 )
 console = Console()
 
-# --- `codey set` ----------------------------------------------------------
-
 
 @app.command("set")
 def set_config():
@@ -63,39 +60,32 @@ def set_config():
 
     presets = all_presets()
     for i, p in enumerate(presets, 1):
-        configured = is_provider_configured(p)
-        badge = "[green]✓ configured[/]" if configured else "[dim]not set[/]"
+        badge = "[green]✓ configured[/]" if is_provider_configured(p) else "[dim]not set[/]"
         console.print(f"  [cyan]{i}[/]. {p.label:<24} {badge}")
     console.print()
 
     choice = IntPrompt.ask(
-        "Select a provider",
-        default=1,
-        choices=[str(i) for i in range(1, len(presets) + 1)],
-        console=console,
+        "Select a provider", default=1,
+        choices=[str(i) for i in range(1, len(presets) + 1)], console=console,
     )
     preset = presets[choice - 1]
 
-    # Ask only the API key for built-in providers (unless already in env).
-    # Keyless providers (local OpenAI-compatible servers) skip this entirely.
+    # Only ask for the API key for built-in providers (keyless local skips it).
     api_key = ""
     if preset.requires_api_key:
         if preset.env_key_var and not is_provider_configured(preset):
-            key_prompt = f"Enter your {preset.label} API key"
-            api_key = Prompt.ask(key_prompt, console=console, password=True)
+            api_key = Prompt.ask(f"Enter your {preset.label} API key", console=console, password=True)
             if not api_key.strip():
                 console.print("[red]API key is required.[/]")
                 raise typer.Exit(1)
         elif preset.env_key_var:
-            # Already configured via env or keyring; reuse.
             api_key = get_api_key(preset) or ""
 
     base_url: str | None = None
     if preset.requires_base_url:
         default_hint = " (e.g. http://localhost:11434/v1 for Ollama)" if not preset.requires_api_key else ""
         base_url = Prompt.ask(
-            f"Enter base URL for {preset.label} (OpenAI-compatible){default_hint}",
-            console=console,
+            f"Enter base URL for {preset.label} (OpenAI-compatible){default_hint}", console=console,
         )
         if not base_url.strip():
             console.print("[red]Base URL is required for custom providers.[/]")
@@ -103,8 +93,7 @@ def set_config():
         if not api_key.strip() and preset.requires_api_key:
             api_key = Prompt.ask("Enter API key", console=console, password=True)
 
-    # Choose model — prefer the live list from the provider's models API,
-    # falling back to the bundled presets when offline/unreachable.
+    # Prefer the live model list; fall back to bundled presets when unreachable.
     from codey.config.models import fetch_available_models, model_fetch_help
 
     console.print(f"[dim]Fetching available models ({model_fetch_help(preset)})…[/]")
@@ -122,10 +111,8 @@ def set_config():
         console.print(f"  [cyan]{len(candidates) + 1}[/]. [dim]Enter a custom model name[/]")
 
         model_choice = IntPrompt.ask(
-            "Pick a model",
-            default=1,
-            choices=[str(i) for i in range(1, len(candidates) + 2)],
-            console=console,
+            "Pick a model", default=1,
+            choices=[str(i) for i in range(1, len(candidates) + 2)], console=console,
         )
         if model_choice <= len(candidates):
             model = candidates[model_choice - 1]
@@ -134,7 +121,6 @@ def set_config():
     else:
         model = Prompt.ask("Enter model name", console=console)
 
-    # Choose summarizer model.
     summarizer_model = preset.summarizer_model or model
     if preset.summarizer_model and candidates:
         console.print()
@@ -145,21 +131,10 @@ def set_config():
         console.print(f"  [cyan]{len(s_candidates) + 1}[/]. [dim]Use same as primary[/]")
         s_choice = IntPrompt.ask("Pick summarizer model", default=1,
                                  choices=[str(i) for i in range(1, len(s_candidates) + 2)], console=console)
-        if s_choice <= len(s_candidates):
-            summarizer_model = s_candidates[s_choice - 1]
-        else:
-            summarizer_model = model
+        summarizer_model = s_candidates[s_choice - 1] if s_choice <= len(s_candidates) else model
 
-    # Save non-secret config.
-    cfg = Config(
-        provider=preset.key,
-        model=model,
-        summarizer_model=summarizer_model,
-        base_url=base_url,
-    )
-    save_config(cfg)
+    save_config(Config(provider=preset.key, model=model, summarizer_model=summarizer_model, base_url=base_url))
 
-    # Save API key to the OS keyring (keyless providers skip this).
     if not preset.requires_api_key:
         console.print(f"[dim]No API key needed for {preset.label} (local endpoint).[/]")
     elif api_key.strip():
@@ -167,8 +142,6 @@ def set_config():
             set_api_key(preset, api_key.strip())
             console.print(f"[green]✓[/] API key stored in OS keyring for {preset.label}")
         except Exception as e:
-            # Headless/CI environments have no keyring backend — degrade
-            # gracefully instead of crashing the setup flow.
             console.print(
                 f"[yellow]Could not store the API key in the OS keyring: {e}[/]\n"
                 f"[dim]Set the {preset.env_key_var} environment variable instead.[/]"
@@ -187,9 +160,6 @@ def set_config():
     console.print("Run [bold]codey review[/] to review the latest commit.")
 
 
-# --- `codey unset` -------------------------------------------------------
-
-
 @app.command("unset")
 def unset_config(
     provider: str = typer.Argument(
@@ -201,12 +171,9 @@ def unset_config(
 ):
     """Remove a provider's API key (and clear config if it is the active one)."""
     presets = all_presets()
-
-    # Cache which providers currently have credentials available.
     configured_map: dict[str, bool] = {p.key: is_provider_configured(p) for p in presets}
 
     if provider is None:
-        # Interactive: show providers with configured credentials, pick one.
         candidates = [p for p in presets if configured_map[p.key]]
         if not candidates:
             console.print("[yellow]No configured providers to remove.[/]")
@@ -218,10 +185,8 @@ def unset_config(
             console.print(f"  [cyan]{i}[/]. {p.label:<24} {badge_for(p, configured_map)}{active}")
         console.print()
         choice = IntPrompt.ask(
-            "Select a provider to remove",
-            default=1,
-            choices=[str(i) for i in range(1, len(candidates) + 1)],
-            console=console,
+            "Select a provider to remove", default=1,
+            choices=[str(i) for i in range(1, len(candidates) + 1)], console=console,
         )
         preset = candidates[choice - 1]
     else:
@@ -234,16 +199,13 @@ def unset_config(
             console.print(f"[yellow]{preset.label} has no API key stored.[/]")
             raise typer.Exit(0)
 
-    # Confirm removal.
     if not Confirm.ask(f"Remove {preset.label} API key and configuration?", default=True, console=console):
         console.print("[dim]Aborted.[/]")
         raise typer.Exit(0)
 
-    # Delete the keyring entry.
     delete_api_key(preset)
     removed_active = False
 
-    # If this was the active provider, clear the config.
     try:
         cfg = load_config()
     except ConfigError:
@@ -261,7 +223,6 @@ def unset_config(
 
 
 def _is_active(preset: ProviderPreset) -> bool:
-    """True when the given preset is the currently active provider in config."""
     try:
         return load_config().provider == preset.key
     except ConfigError:
@@ -270,9 +231,6 @@ def _is_active(preset: ProviderPreset) -> bool:
 
 def badge_for(preset: ProviderPreset, configured_map: dict[str, bool]) -> str:
     return "[green]✓ configured[/]" if configured_map.get(preset.key) else "[dim]not set[/]"
-
-
-# --- `codey model` ------------------------------------------------------
 
 
 @app.command("model")
@@ -301,16 +259,20 @@ def model_cmd():
         raise typer.Exit(1) from e
 
 
-def _switch_model(cfg: Config, preset: ProviderPreset) -> None:
-    from codey.config.models import fetch_available_models
-
-    # Live model list when reachable; bundled list otherwise.
+def _resolved_key(cfg: Config) -> tuple[str, str | None]:
     try:
         from codey.config.store import resolve_provider
 
         _, api_key, base_url = resolve_provider(cfg)
+        return api_key, base_url
     except Exception:
-        api_key, base_url = "", None
+        return "", None
+
+
+def _switch_model(cfg: Config, preset: ProviderPreset) -> None:
+    from codey.config.models import fetch_available_models
+
+    api_key, base_url = _resolved_key(cfg)
     live = fetch_available_models(preset, api_key=api_key, base_url=base_url)
     candidates = live or preset.recommended_models
 
@@ -319,14 +281,11 @@ def _switch_model(cfg: Config, preset: ProviderPreset) -> None:
             tag = "[green](current)[/]" if m == cfg.model else ""
             console.print(f"  [cyan]{i}[/]. {m} {tag}")
         console.print(f"  [cyan]{len(candidates) + 1}[/]. [dim]Enter custom[/]")
-        choice = IntPrompt.ask("Pick model",
-                               default=1,
-                               choices=[str(i) for i in range(1, len(candidates) + 2)],
-                               console=console)
-        if choice <= len(candidates):
-            cfg.model = candidates[choice - 1]
-        else:
-            cfg.model = Prompt.ask("Enter model name", console=console)
+        choice = IntPrompt.ask("Pick model", default=1,
+                               choices=[str(i) for i in range(1, len(candidates) + 2)], console=console)
+        cfg.model = candidates[choice - 1] if choice <= len(candidates) else Prompt.ask(
+            "Enter model name", console=console,
+        )
     else:
         cfg.model = Prompt.ask("Enter model name", default=cfg.model, console=console)
     save_config(cfg)
@@ -340,35 +299,24 @@ def _set_summarizer(cfg: Config, preset: ProviderPreset) -> None:
         return
     from codey.config.models import fetch_available_models
 
-    try:
-        from codey.config.store import resolve_provider
-
-        _, api_key, base_url = resolve_provider(cfg)
-    except Exception:
-        api_key, base_url = "", None
+    api_key, base_url = _resolved_key(cfg)
     live = fetch_available_models(preset, api_key=api_key, base_url=base_url)
     models = live or preset.recommended_models
     candidates = [preset.summarizer_model] + [m for m in models if m != preset.summarizer_model]
     candidates.append(cfg.model)
     for i, m in enumerate(candidates, 1):
         console.print(f"  [cyan]{i}[/]. {m}")
-    choice = IntPrompt.ask("Pick summarizer model",
-                           default=1,
-                           choices=[str(i) for i in range(1, len(candidates) + 1)],
-                           console=console)
+    choice = IntPrompt.ask("Pick summarizer model", default=1,
+                           choices=[str(i) for i in range(1, len(candidates) + 1)], console=console)
     cfg.summarizer_model = candidates[choice - 1]
     save_config(cfg)
     console.print(f"[green]✓[/] Summarizer set to [bold]{cfg.summarizer_model}[/]")
 
 
-# --- `codey config` ----------------------------------------------------
-
-
 @app.command("config")
 def config_cmd(
     append_summary: bool | None = typer.Option(
-        None,
-        "--append-summary/--no-append-summary",
+        None, "--append-summary/--no-append-summary",
         help=(
             "Toggle appending the generated review summary to the reviewed "
             "commit's description (suffixed with '— generated by codey'). "
@@ -377,15 +325,10 @@ def config_cmd(
         show_default=False,
     ),
 ):
-    """Show current configuration, or toggle the commit-summary setting.
-
-    Pass ``--append-summary`` / ``--no-append-summary`` to persist the global
-    setting used by ``codey review``.
-    """
+    """Show current configuration, or toggle the commit-summary setting."""
     try:
         cfg = load_config()
 
-        # Toggle the global append-summary setting (persist + exit).
         if append_summary is not None:
             cfg.append_summary_to_commit = append_summary
             save_config(cfg)
@@ -424,35 +367,19 @@ def config_cmd(
         raise typer.Exit(1) from e
 
 
-# --- `codey graph` ------------------------------------------------------
-
-
 @app.command("graph")
 def graph_cmd(
-    symbol: str = typer.Option(
-        None, "--symbol", "-s",
-        help="Filter to a specific symbol name (shows callers + callees).",
-        metavar="NAME",
-    ),
-    file_filter: str = typer.Option(
-        None, "--file", "-f",
-        help="Filter to a specific file path (relative to repo root).",
-        metavar="PATH",
-    ),
-    imports_only: bool = typer.Option(
-        False, "--imports", "-i",
-        help="Show only the import graph (which files import which modules).",
-    ),
-    stats_only: bool = typer.Option(
-        False, "--stats",
-        help="Show summary statistics only (no symbol/edge listings).",
-    ),
+    symbol: str = typer.Option(None, "--symbol", "-s",
+                               help="Filter to a specific symbol name (shows callers + callees).", metavar="NAME"),
+    file_filter: str = typer.Option(None, "--file", "-f",
+                                    help="Filter to a specific file path (relative to repo root).", metavar="PATH"),
+    imports_only: bool = typer.Option(False, "--imports", "-i", help="Show only the import graph."),
+    stats_only: bool = typer.Option(False, "--stats", help="Show summary statistics only."),
 ):
     """View the indexed code graph (symbols, call edges, import edges)."""
     from codey.cache.ast_cache import CacheDB
 
-    repo = Path.cwd()
-    repo_str = str(repo.resolve())
+    repo_str = str(Path.cwd().resolve())
     db = CacheDB()
 
     try:
@@ -465,33 +392,20 @@ def graph_cmd(
             )
             raise typer.Exit(1)
 
-        # Gather data.
-        symbols = db.all_symbols(repo_str, git_hash)
-        call_edges = db.all_call_edges(repo_str, git_hash)
-
-        # Import edges: query all via a direct SQL query.
         from codey.cache.ast_cache import ImportEdge
 
+        symbols = db.all_symbols(repo_str, git_hash)
+        call_edges = db.all_call_edges(repo_str, git_hash)
         rows = db.conn.execute(
             "SELECT rel_path, module, imported_name, alias, line "
             "FROM import_edges WHERE repo_path=? AND git_hash=?",
             (repo_str, git_hash),
         ).fetchall()
-        import_edges = [
-            ImportEdge(
-                rel_path=row["rel_path"],
-                module=row["module"],
-                imported_name=row["imported_name"],
-                alias=row["alias"],
-                line=row["line"],
-            )
-            for row in rows
-        ]
+        import_edges = [ImportEdge(r["rel_path"], r["module"], r["imported_name"], r["alias"], r["line"]) for r in rows]
 
-        # --- Header ---
         console.print()
         console.print(Panel(
-            f"Repository:   [bold]{repo.name}[/]\n"
+            f"Repository:   [bold]{Path.cwd().name}[/]\n"
             f"Git hash:     [dim]{git_hash[:12]}[/]\n"
             f"Files:         {len(set(s.rel_path for s in symbols))}\n"
             f"Symbols:       {len(symbols)}\n"
@@ -504,18 +418,13 @@ def graph_cmd(
 
         if stats_only:
             return
-
-        # --- Symbol filter ---
         if symbol is not None:
-            _render_symbol_detail(db, repo_str, git_hash, symbol, symbols, call_edges, console)
+            _render_symbol_detail(symbol, symbols, call_edges, console)
             return
-
-        # --- Import-only mode ---
         if imports_only:
             _render_import_graph(import_edges, file_filter, console)
             return
 
-        # --- Full graph: symbols by file + call edges ---
         _render_symbol_tree(symbols, file_filter, console)
         console.print()
         _render_call_edges(call_edges, file_filter, console)
@@ -523,15 +432,9 @@ def graph_cmd(
         db.close()
 
 
-def _render_symbol_tree(
-    symbols: list,
-    file_filter: str | None,
-    console: Console,
-) -> None:
-    """Render symbols grouped by file as a rich tree."""
+def _render_symbol_tree(symbols: list, file_filter: str | None, console: Console) -> None:
     from rich.tree import Tree
 
-    # Group by file.
     by_file: dict[str, list] = {}
     for s in symbols:
         if file_filter and s.rel_path != file_filter:
@@ -539,40 +442,23 @@ def _render_symbol_tree(
         by_file.setdefault(s.rel_path, []).append(s)
 
     if not by_file:
-        console.print("[dim]No symbols found"
-                      + (f" in {file_filter}" if file_filter else "")
-                      + ".[/]")
+        console.print("[dim]No symbols found" + (f" in {file_filter}" if file_filter else "") + ".[/]")
         return
 
+    kind_icons = {"function": "fn", "class": "cls", "method": "m", "variable": "var", "import": "imp"}
     tree = Tree(f"[bold cyan]Symbols[/] ({len(symbols)} total, {len(by_file)} files)")
-
-    _KIND_ICONS = {
-        "function": "fn",
-        "class": "cls",
-        "method": "m",
-        "variable": "var",
-        "import": "imp",
-    }
 
     for fpath in sorted(by_file):
         file_syms = sorted(by_file[fpath], key=lambda s: (s.line_start, s.kind))
         file_branch = tree.add(f"[bold]{fpath}[/] [dim]({len(file_syms)} symbols)[/]")
         for s in file_syms:
-            icon = _KIND_ICONS.get(s.kind, s.kind[:3])
-            file_branch.add(
-                f"[cyan]{icon}[/]  [bold]{s.name}[/]"
-                f"  [dim]L{s.line_start}-{s.line_end}[/]"
-            )
+            icon = kind_icons.get(s.kind, s.kind[:3])
+            file_branch.add(f"[cyan]{icon}[/]  [bold]{s.name}[/]  [dim]L{s.line_start}-{s.line_end}[/]")
 
     console.print(tree)
 
 
-def _render_call_edges(
-    call_edges: list,
-    file_filter: str | None,
-    console: Console,
-) -> None:
-    """Render call edges as a rich table."""
+def _render_call_edges(call_edges: list, file_filter: str | None, console: Console) -> None:
     from rich.table import Table
 
     edges = call_edges
@@ -580,9 +466,7 @@ def _render_call_edges(
         edges = [e for e in call_edges if e.caller_path == file_filter or e.callee_path == file_filter]
 
     if not edges:
-        console.print("[dim]No call edges found"
-                      + (f" for {file_filter}" if file_filter else "")
-                      + ".[/]")
+        console.print("[dim]No call edges found" + (f" for {file_filter}" if file_filter else "") + ".[/]")
         return
 
     table = Table(title=f"Call Edges ({len(edges)})", show_lines=False)
@@ -592,10 +476,9 @@ def _render_call_edges(
     table.add_column("Line", justify="right", style="dim")
 
     for e in edges[:500]:
-        callee_display = e.callee_qname or e.callee_name
         table.add_row(
             f"{e.caller_path}:{e.caller_qname}",
-            callee_display,
+            e.callee_qname or e.callee_name,
             e.callee_path or "(external)",
             str(e.line),
         )
@@ -605,12 +488,7 @@ def _render_call_edges(
     console.print(table)
 
 
-def _render_import_graph(
-    import_edges: list,
-    file_filter: str | None,
-    console: Console,
-) -> None:
-    """Render import edges as a rich tree."""
+def _render_import_graph(import_edges: list, file_filter: str | None, console: Console) -> None:
     from rich.tree import Tree
 
     edges = import_edges
@@ -618,9 +496,7 @@ def _render_import_graph(
         edges = [e for e in import_edges if e.rel_path == file_filter]
 
     if not edges:
-        console.print("[dim]No import edges found"
-                      + (f" for {file_filter}" if file_filter else "")
-                      + ".[/]")
+        console.print("[dim]No import edges found" + (f" for {file_filter}" if file_filter else "") + ".[/]")
         return
 
     by_file: dict[str, list] = {}
@@ -629,9 +505,8 @@ def _render_import_graph(
 
     tree = Tree(f"[bold cyan]Import Graph[/] ({len(edges)} edges, {len(by_file)} files)")
     for fpath in sorted(by_file):
-        file_edges = sorted(by_file[fpath], key=lambda e: e.line)
         branch = tree.add(f"[bold]{fpath}[/]")
-        for e in file_edges:
+        for e in sorted(by_file[fpath], key=lambda e: e.line):
             if e.imported_name:
                 label = f"from [bold]{e.module}[/] import [cyan]{e.imported_name}[/]"
             else:
@@ -644,31 +519,19 @@ def _render_import_graph(
     console.print(tree)
 
 
-def _render_symbol_detail(
-    db,
-    repo_str: str,
-    git_hash: str,
-    symbol_name: str,
-    symbols: list,
-    call_edges: list,
-    console: Console,
-) -> None:
-    """Render detailed info for a single symbol: callers + callees."""
+def _render_symbol_detail(symbol_name: str, symbols: list, call_edges: list, console: Console) -> None:
     from rich.table import Table
 
-    # Find matching symbols.
     matches = [s for s in symbols if s.name == symbol_name or s.qualified_name == symbol_name]
     if not matches:
         console.print(f"[yellow]Symbol '{symbol_name}' not found in the index.[/]")
         return
 
-    # Symbol definitions.
     console.print(f"[bold]Symbol: [cyan]{symbol_name}[/][/]")
     console.print()
     for s in matches:
         console.print(f"  [bold]{s.kind}[/]  {s.rel_path}  [dim]L{s.line_start}-{s.line_end}[/]")
 
-    # Callers (who calls this symbol).
     callers = [e for e in call_edges if e.callee_name == symbol_name or e.callee_qname == symbol_name]
     console.print()
     if callers:
@@ -682,7 +545,6 @@ def _render_symbol_detail(
     else:
         console.print("[dim]No callers found.[/]")
 
-    # Callees (what does this symbol call).
     callees = [e for e in call_edges if e.caller_qname == symbol_name]
     console.print()
     if callees:
@@ -691,11 +553,7 @@ def _render_symbol_detail(
         callee_table.add_column("Callee File", style="dim")
         callee_table.add_column("Line", justify="right", style="dim")
         for e in callees:
-            callee_table.add_row(
-                e.callee_qname or e.callee_name,
-                e.callee_path or "(external)",
-                str(e.line),
-            )
+            callee_table.add_row(e.callee_qname or e.callee_name, e.callee_path or "(external)", str(e.line))
         console.print(callee_table)
     else:
         console.print("[dim]No callees found.[/]")
@@ -703,30 +561,18 @@ def _render_symbol_detail(
 
 @app.command("review")
 def review_cmd(
-    commit: str = typer.Argument(
-        "HEAD",
-        help="Commit to review (hash, branch, tag, or 'HEAD'). Defaults to the latest commit.",
-        show_default=False,
-        metavar="COMMIT",
-    ),
+    commit: str = typer.Argument("HEAD", help="Commit to review (hash, branch, tag, or 'HEAD').",
+                                show_default=False, metavar="COMMIT"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable live progress output."),
     force_index: bool = typer.Option(False, "--force-index", help="Force re-indexing of the repo."),
     run_tests: bool = typer.Option(
-        False,
-        "--run-tests",
-        help=(
-            "Execute test commands detected in the repo (e.g. pytest, npm test). "
-            "Requires confirmation — this runs code from the repo under review."
-        ),
+        False, "--run-tests",
+        help="Execute test commands detected in the repo (e.g. pytest, npm test). "
+        "Requires confirmation — this runs code from the repo under review.",
     ),
-    json_out: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit the review as JSON on stdout (machine-readable; skips rich rendering).",
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the review as JSON on stdout."),
 ):
-    """Review a commit (latest by default) in the local repo.
-    """
+    """Review a commit (latest by default) in the local repo."""
     from codey.cache.ast_cache import CacheDB
     from codey.llm.factory import build_llm, build_summarizer
     from codey.progress import ProgressEmitter, make_callback
@@ -734,8 +580,6 @@ def review_cmd(
     from codey.review.git import resolve_commit
     from codey.review.pipeline import run_pipeline
 
-    # Test execution is opt-in AND confirmed: it runs code from the repo
-    # being reviewed, so never do it implicitly.
     if run_tests:
         console.print(
             "[yellow]Test execution is enabled.[/] This will run commands detected "
@@ -745,7 +589,7 @@ def review_cmd(
         run_tests = Confirm.ask("Proceed with test execution?", default=False, console=console)
         if not run_tests:
             console.print("[dim]Skipping test execution; test agent will report skipped.[/]")
-    # Validate config.
+
     try:
         cfg = load_config()
         primary_resolved = build_llm(cfg)
@@ -757,7 +601,6 @@ def review_cmd(
 
     repo = Path.cwd()
 
-    # Validate the commit exists before doing anything expensive.
     resolved = resolve_commit(repo, commit)
     if resolved is None:
         console.print(f"[red]Error:[/] commit [bold]{commit}[/] not found in this repository.")
@@ -790,8 +633,7 @@ def review_cmd(
 
     try:
         result = run_pipeline(
-            repo,
-            db,
+            repo, db,
             primary_llm=primary_resolved.model,
             summarizer_llm=summarizer_resolved.model,
             progress_callback=cb,
@@ -800,8 +642,7 @@ def review_cmd(
         )
     except Exception as e:
         emitter.emit_error("pipeline", str(e))
-        _is_rate_limit_err = _is_rate_limit_error(e)
-        if _is_rate_limit_err:
+        if _is_rate_limit_error(e):
             console.print(
                 "[red]All retry attempts exhausted.[/] The LLM provider is rate-limiting "
                 "your requests. Wait a minute and try again, or switch to a different "
@@ -812,10 +653,6 @@ def review_cmd(
         db.close()
 
     if json_out:
-        # Machine-readable output: dump the full ReviewSummary to stdout
-        # directly (no rich markup interpretation — console.print with
-        # markup would mangle any [brackets] inside summaries) and skip the
-        # human progress/render so stdout is pure JSON (usable as a CI gate).
         import sys
 
         sys.stdout.write(result.review.model_dump_json(indent=2) + "\n")
@@ -828,14 +665,7 @@ def review_cmd(
 
 
 def _maybe_append_summary(review, *, repo: Path, commit: str, cfg: Config, console: Console) -> None:
-    """Append the generated review summary to the reviewed commit's description.
-
-    Global setting: asked once (when ``cfg.append_summary_to_commit`` is unset),
-    then persisted. Toggle later with `codey config --append-summary/--no-append-summary`.
-
-    Only amends when the reviewed commit is the current HEAD (so we don't
-    rewrite history for arbitrary past commits).
-    """
+    """Append the review summary to the reviewed commit's description (HEAD only)."""
     from codey.review.git import (
         amend_commit_message,
         get_commit_full_message,
@@ -843,7 +673,6 @@ def _maybe_append_summary(review, *, repo: Path, commit: str, cfg: Config, conso
         resolve_commit,
     )
 
-    # Determine the effective setting (ask once if unset).
     setting = cfg.append_summary_to_commit
     if setting is None:
         console.print()
@@ -864,8 +693,6 @@ def _maybe_append_summary(review, *, repo: Path, commit: str, cfg: Config, conso
     if not setting:
         return
 
-    # Only amend when the reviewed commit is HEAD; rewriting arbitrary past
-    # commits would require a rebase and is intentionally out of scope.
     head = resolve_commit(repo, "HEAD")
     if head is None or resolve_commit(repo, commit) != head:
         console.print(
@@ -886,19 +713,13 @@ def _maybe_append_summary(review, *, repo: Path, commit: str, cfg: Config, conso
         console.print("[dim]No summary to append.[/]")
         return
 
-    # Strip markdown/code fences from the summary — appending the raw
-    # markdown (with evidence snippets) would inject review internals into
-    # permanent git history.
     plain_summary = _plain_text_summary(summary)
-
     original = get_commit_full_message(repo, commit="HEAD").rstrip()
     suffix = "— generated by codey"
     new_message = f"{original}\n\n{plain_summary}\n\n{suffix}"
 
     ok, info = amend_commit_message(repo, new_message)
     if ok:
-        # The amend rewrote HEAD — refresh the review's hash and note the
-        # rewrite so the report's own header doesn't claim a stale commit.
         new_head = resolve_commit(repo, "HEAD")
         if new_head and new_head != review.commit_hash:
             review.commit_hash = new_head
@@ -914,13 +735,7 @@ def _maybe_append_summary(review, *, repo: Path, commit: str, cfg: Config, conso
 
 
 def _plain_text_summary(markdown: str) -> str:
-    """Reduce a markdown summary to plain text for embedding in a commit.
-
-    Removes code fences, inline code spans, bold/italic markers, headings,
-    and reference links, then collapses blank lines. Keeps the content but
-    keeps review-internal formatting (and any evidence snippets) out of the
-    permanent commit message.
-    """
+    """Reduce a markdown summary to plain text for embedding in a commit."""
     import re as _re
 
     text = markdown
@@ -936,7 +751,6 @@ def _plain_text_summary(markdown: str) -> str:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """True when *exc* is likely a rate-limit / quota error after retries."""
     status = getattr(exc, "status_code", None)
     if status is not None:
         try:

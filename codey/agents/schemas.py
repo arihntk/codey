@@ -1,12 +1,8 @@
-"""Pydantic schemas for structured agent findings.
-
-Every agent emits an ``AgentReport`` containing a list of ``Finding`` objects,
-each with severity, evidence, and file/line references.  The orchestrator
-synthesizes these into a ``ReviewReport``.
-"""
+"""Pydantic schemas for structured agent findings + shared LLM-JSON parsing."""
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Literal
 
@@ -19,6 +15,11 @@ __all__ = [
     "AgentReport",
     "ReviewSummary",
     "AgentName",
+    "severity_weight",
+    "aggregate_severity",
+    "strip_code_fences",
+    "llm_output_is_parseable",
+    "parse_llm_findings",
 ]
 
 
@@ -41,14 +42,10 @@ class FindingCategory(StrEnum):
     STYLE = "style"
 
 
-AgentName = Literal[
-    "index", "security", "code_quality", "test", "codey"
-]
+AgentName = Literal["index", "security", "code_quality", "test", "codey"]
 
 
 class Finding(BaseModel):
-    """A single structured finding from an agent."""
-
     category: FindingCategory
     severity: Severity = Severity.INFO
     title: str = Field(..., description="Short title of the finding")
@@ -62,16 +59,11 @@ class Finding(BaseModel):
 
 
 class AgentReport(BaseModel):
-    """Standalone report emitted by a single agent."""
-
     agent: AgentName
     status: Literal["completed", "skipped", "error"] = "completed"
     summary: str = Field("", description="High-level summary of agent findings")
     findings: list[Finding] = Field(default_factory=list)
-    metadata: dict[str, str] = Field(
-        default_factory=dict,
-        description="Agent-specific metadata (tool output, counts, etc.)",
-    )
+    metadata: dict[str, str] = Field(default_factory=dict)
     token_usage: int = Field(0, description="Approximate tokens consumed")
     error: str | None = None
 
@@ -86,8 +78,6 @@ class AgentReport(BaseModel):
 
 
 class ReviewSummary(BaseModel):
-    """The orchestrator's final synthesized review."""
-
     overall_severity: Severity = Severity.INFO
     summary: str = Field("", description="Executive summary of the review")
     commit_hash: str = ""
@@ -97,36 +87,79 @@ class ReviewSummary(BaseModel):
     agent_reports: dict[str, AgentReport] = Field(default_factory=dict)
     total_findings: int = 0
     recommendation: Literal["approve", "request_changes", "block"] = "approve"
-    errors: list[str] = Field(
-        default_factory=list,
-        description="Structured errors encountered during the review (agent LLM "
-        "failures, unparseable output, pipeline issues). Never silently dropped.",
-    )
-    pruned_chunks: list[str] = Field(
-        default_factory=list,
-        description="Diff chunk ranges omitted by context-budget pruning, e.g. "
-        "'path:10-25'. Empty when nothing was pruned.",
-    )
+    errors: list[str] = Field(default_factory=list)
+    pruned_chunks: list[str] = Field(default_factory=list)
 
     def all_findings(self) -> list[Finding]:
-        out: list[Finding] = []
-        for r in self.agent_reports.values():
-            out.extend(r.findings)
-        return out
+        return [f for r in self.agent_reports.values() for f in r.findings]
+
+
+_WEIGHTS = {Severity.CRITICAL: 4, Severity.HIGH: 3, Severity.MEDIUM: 2, Severity.LOW: 1, Severity.INFO: 0}
 
 
 def severity_weight(s: Severity) -> int:
-    return {
-        Severity.CRITICAL: 4,
-        Severity.HIGH: 3,
-        Severity.MEDIUM: 2,
-        Severity.LOW: 1,
-        Severity.INFO: 0,
-    }.get(s, 0)
+    return _WEIGHTS.get(s, 0)
 
 
 def aggregate_severity(findings: list[Finding]) -> Severity:
-    """Compute the maximum severity across findings."""
-    if not findings:
-        return Severity.INFO
-    return max(findings, key=lambda f: severity_weight(f.severity)).severity
+    return max((f.severity for f in findings), key=severity_weight, default=Severity.INFO)
+
+
+# --- Shared LLM-JSON parsing -------------------------------------------------
+
+
+def strip_code_fences(text: str) -> str:
+    """Remove an enclosing markdown ``` code fence, if present."""
+    t = text.strip()
+    if t.startswith("```"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+    return t
+
+
+def llm_output_is_parseable(text: str) -> bool:
+    """True when *text* parses as a JSON array (possibly empty)."""
+    try:
+        json.loads(strip_code_fences(text))
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+def parse_llm_findings(text: str, category: FindingCategory) -> tuple[list[Finding], str | None]:
+    """Parse LLM JSON output into ``Finding`` objects, defensively.
+
+    Returns ``(findings, error)`` — malformed items (e.g. ``"severity": null``)
+    are skipped rather than crashing the whole parse, and the count is returned
+    as an error note. Unparseable top-level JSON yields ``([], None)``.
+    """
+    try:
+        data = json.loads(strip_code_fences(text))
+    except json.JSONDecodeError:
+        return [], None
+    if not isinstance(data, list):
+        return [], "LLM output was not a JSON array"
+    findings: list[Finding] = []
+    malformed = 0
+    for item in data:
+        try:
+            sev_raw = item.get("severity", "info")
+            if sev_raw is None:
+                raise ValueError("severity is null")
+            conf_raw = item.get("confidence", 0.7)
+            findings.append(Finding(
+                category=category,
+                severity=Severity(str(sev_raw).lower()),
+                title=item.get("title", ""),
+                description=item.get("description", ""),
+                file_path=item.get("file_path"),
+                line_start=item.get("line_start"),
+                line_end=item.get("line_end"),
+                evidence=item.get("evidence", ""),
+                recommendation=item.get("recommendation", ""),
+                confidence=float(conf_raw) if conf_raw is not None else 0.7,
+            ))
+        except (ValueError, TypeError):
+            malformed += 1
+    error = f"{malformed} malformed LLM finding(s) skipped" if malformed else None
+    return findings, error

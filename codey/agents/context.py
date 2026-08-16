@@ -12,7 +12,7 @@ __all__ = ["ReviewContext", "DiffChunk"]
 
 @dataclass
 class DiffChunk:
-    """A logical chunk of a diff (function/class level)."""
+    """A logical (function/class-level) chunk of a diff."""
 
     file_path: str
     language: str
@@ -21,7 +21,7 @@ class DiffChunk:
     diff_text: str
     line_start: int
     line_end: int
-    full_source: str = ""  # full file source for context
+    full_source: str = ""
 
 
 @dataclass
@@ -41,14 +41,5 @@ class ReviewContext:
     index_summary: str = ""  # architecture/design summary from indexer
     max_tokens: int = 100_000  # context window budget
     run_tests: bool = False  # execute detected test commands (opt-in; see CLI)
-    cache_repo_path: Path | None = field(
-        default=None,
-        # Canonical repo used as the cache key when repo_path is a temporary
-        # worktree (non-HEAD reviews). File reads use repo_path; DB keys use
-        # this so temp worktrees never pollute or miss the cache.
-    )
-    pruned_chunks: list[str] = field(
-        default_factory=list,
-        # Chunk ranges dropped by context-budget pruning, e.g. 'path:10-25'.
-        # Empty when nothing was dropped.
-    )
+    cache_repo_path: Path | None = field(default=None)  # canonical cache key for temp worktrees
+    pruned_chunks: list[str] = field(default_factory=list)  # chunk ranges dropped by budget pruning
