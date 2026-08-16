@@ -635,7 +635,7 @@ def review_cmd(
         result = run_pipeline(
             repo, db,
             primary_llm=primary_resolved.model,
-            summarizer_llm=summarizer_resolved.model,
+            summarizer_llm=summarizer_resolved,
             progress_callback=cb,
             commit=commit,
             run_tests=run_tests,
