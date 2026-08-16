@@ -42,8 +42,11 @@ codey review <commit>   # review a specific commit
 | `codey config` | Show configuration or toggle commit summary append |
 | `codey graph` | Inspect the indexed symbol, call, and import graph |
 | `codey review [COMMIT]` | Review a commit, latest by default |
+| `codey eval` | Score review quality against golden scenarios |
 
 `codey review` options: `--no-progress`, `--force-index`, `--run-tests` (requires confirmation), `--json` (machine readable output for CI).
+
+`codey eval` options: `--mode real|fake`, `--scenario ID`, `--tag TAG`, `--judge/--no-judge`, `--run-tests`, `--json`, `--keep-repos`, `--no-progress`.
 
 ## Providers
 
@@ -126,6 +129,19 @@ flowchart TD
 ```
 
 The index agent builds the symbol table and architecture summary first. Security, code quality, and test agents then run in parallel. The codey orchestrator synthesizes their reports into a final verdict. A deterministic recommendation is computed first, and the LLM can only make it stricter, never more optimistic.
+
+## Evaluation
+
+`codey eval` scores review quality against a golden dataset of synthetic repositories with hand-annotated injected issues. Each scenario runs the full review pipeline and the findings are scored for precision, recall, F1, severity calibration, recommendation correctness, and evidence grounding (verbatim and anchored in the diff/source).
+
+```bash
+codey eval                 # real mode — uses your configured LLMs (judge on)
+codey eval --mode fake     # deterministic stub LLM, no API key (CI-safe)
+codey eval --json          # machine-readable report for CI gates
+codey eval --tag deterministic --mode fake   # only deterministic scenarios
+```
+
+The dataset covers hardcoded secrets (OpenAI/AWS/PEM), placeholder and removed-secret false-positive guards, SQL injection and PII leaks (LLM security judgement), code-quality regressions and clean-code guards, passing and failing test suites, non-HEAD worktree reviews, dependent-file discovery, and large-diff context pruning. With `--judge` (default in real mode) an LLM also grades the synthesized summary on a groundedness/completeness/actionability/precision rubric.
 
 ## Development
 
