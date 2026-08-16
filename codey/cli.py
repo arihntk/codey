@@ -761,6 +761,100 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return "ratelimit" in name or "quota" in name or "resourceexhausted" in name
 
 
+@app.command("eval")
+def eval_cmd(
+    scenario: list[str] = typer.Option(
+        None, "--scenario", "-s",
+        help="Run only these scenario IDs (repeatable; e.g. secret-openai-key).",
+    ),
+    tag: list[str] = typer.Option(
+        None, "--tag", "-t",
+        help="Run only scenarios carrying these tags (repeatable; e.g. deterministic).",
+    ),
+    mode: str = typer.Option(
+        "real", "--mode",
+        help="'real' uses the configured LLMs; 'fake' uses a deterministic stub (no API key, CI-safe).",
+    ),
+    judge: bool | None = typer.Option(
+        None, "--judge/--no-judge",
+        help="Run the LLM-as-judge rubric pass (default: on in real mode, off in fake mode).",
+    ),
+    run_tests: bool = typer.Option(
+        False, "--run-tests",
+        help="Execute test commands for test scenarios (requires confirmation).",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the eval report as JSON on stdout."),
+    keep_repos: bool = typer.Option(
+        False, "--keep-repos",
+        help="Keep the generated scenario repositories on disk for inspection.",
+    ),
+    no_progress: bool = typer.Option(False, "--no-progress", help="Disable live progress output."),
+):
+    """Run the golden-scenario evaluation suite and score review quality.
+
+    Each scenario is a synthetic git repo with hand-annotated issues. The full
+    review pipeline runs over it and the findings are scored for precision,
+    recall, severity calibration, recommendation correctness and evidence
+    grounding. With ``--judge`` (default in real mode) an LLM also grades the
+    synthesized summary.
+    """
+    from codey.evals.report import render_eval_report
+    from codey.evals.runner import run_evals
+
+    if mode not in ("real", "fake"):
+        console.print(f"[red]Error:[/] mode must be 'real' or 'fake', got '{mode}'.")
+        raise typer.Exit(1)
+
+    if run_tests:
+        console.print(
+            "[yellow]Test execution is enabled.[/] Test scenarios will run commands "
+            "detected in the generated repositories (pytest, etc.)."
+        )
+        run_tests = Confirm.ask("Proceed with test execution?", default=False, console=console)
+        if not run_tests:
+            console.print("[dim]Skipping test execution; test scenarios will be reported as-is.[/]")
+
+    if mode == "real":
+        try:
+            from codey.llm.factory import build_llm, build_summarizer
+
+            build_llm()
+            build_summarizer()
+        except ConfigError as e:
+            console.print(f"[red]{e}[/]")
+            console.print("[dim]Run [bold]codey set[/] to configure a provider, or use --mode fake.[/]")
+            raise typer.Exit(1) from e
+
+    judge_enabled = (mode == "real") if judge is None else judge
+    if not json_out:
+        console.print()
+        console.print(f"[bold]Codey Evaluation[/] — mode [cyan]{mode}[/]"
+                      + (f", judge [cyan]{'on' if judge_enabled else 'off'}[/]" if judge is not None else ""))
+        console.print()
+
+    def progress(message: str) -> None:
+        if not no_progress and not json_out:
+            console.print(f"[cyan]›[/] {message}")
+
+    try:
+        report = run_evals(
+            mode=mode, scenario_ids=scenario or None, tags=tag or None,
+            judge=judge_enabled, run_tests=run_tests, keep_repos=keep_repos,
+            progress=progress if not no_progress else None,
+        )
+    except Exception as e:
+        console.print(f"[red]Evaluation failed:[/] {e}")
+        raise typer.Exit(1) from e
+
+    if json_out:
+        import sys
+
+        sys.stdout.write(report.model_dump_json(indent=2) + "\n")
+    else:
+        console.print()
+        render_eval_report(report, console=console)
+
+
 def main() -> None:
     app()
 
