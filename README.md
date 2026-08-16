@@ -4,121 +4,128 @@
 [![Python](https://img.shields.io/pypi/pyversions/codey-review.svg)](https://pypi.org/project/codey-review/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Production-grade multi-agent AI code review system.**
+Production grade multi-agent AI code review system. Codey orchestrates four specialist agents (security, code quality, testing, indexing) over a commit diff, then emits a structured verdict with a recommendation.
 
-Codey orchestrates specialized agents — security, code quality, testing, and indexing — over your local git diff, with tree-sitter AST caching and jedi-based reverse-dependency lookup. Built on [LangGraph](https://github.com/langchain-ai/langgraph).
-
-```
-codey set      # configure provider & API key (OpenAI / Anthropic / DeepSeek / Google / custom / local)
-codey model    # view or switch the active model (fetches the latest model list)
-codey config   # show current configuration
-codey review   # review the latest commit in the local repo
-```
-
-The model pickers in `codey set` and `codey model` fetch the **live model
-list** from the provider's models API (OpenAI, Anthropic, Google, DeepSeek,
-and your local server's `/models` endpoint) instead of a hardcoded list. If
-the provider is unreachable, it falls back to the bundled list with a note.
-
-## Providers
-
-| Provider | Key required | Notes |
-|----------|-------------|-------|
-| OpenAI | yes | `gpt-4.1`, `gpt-4o`, `o3-mini` |
-| Anthropic | yes | Claude models |
-| DeepSeek | yes | `deepseek-chat`, `deepseek-reasoner` |
-| Google | yes | Gemini models |
-| Custom (OpenAI-compatible) | yes | any `base_url` |
-| **Local** | **no** | Ollama / LM Studio / llama.cpp / vLLM via their OpenAI-compatible `/v1` endpoint — enter e.g. `http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio) as the base URL, then pick a model name you've pulled. No API key is stored or sent. |
-
-## Features
-
-- **Multi-agent review**: LangGraph DAG fans out to 4 specialist agents in parallel, each emitting a structured report
-- **AST-aware caching**: tree-sitter parses files once; subsequent runs diff against the last git-hash and re-parse only changed files (sqlite at `~/.cache/codey/codey.db`)
-- **Reverse-dependency lookup** (Python v1): jedi call graph finds files that import or call into changed code, sending affected-but-unmodified chunks to the LLM for verification
-- **AST-aware diff chunking**: large diffs are broken into function/class-level chunks mapped via the cached symbol table
-- **Context window budgeting**: cheap/fast summarizer model condenses very large diffs; chunks are pruned to fit the model's token budget, and pruned ranges are reported — never silently dropped
-- **Security analysis**: deterministic hardcoded-secret detector (prefix rules + entropy) + `bandit` (Python), `semgrep` (multi-language), `gitleaks` (secrets, scoped to the commit) + LLM confidentiality judgement; the deterministic detector scans the raw diff, never an LLM summary
-- **Code quality benchmarking**: compares the diff against the indexed codebase's architecture/design conventions
-- **Test execution**: auto-detects the test framework (pytest, npm, go, cargo, rake); opt-in via `--run-tests` with confirmation — never executes repo code implicitly
-- **Live progress**: rich terminal updates as each agent starts and finishes
-- **Rich rendering**: final summary as markdown with severity-coloured findings table; machine-readable `--json` output for CI
-- **Commit-message integration**: optionally appends the generated summary to the reviewed commit's description (global setting, plain-text, HEAD only)
+Built on LangGraph with tree-sitter AST caching and jedi based reverse dependency lookup.
 
 ## Install
+
+Codey requires Python 3.13+.
 
 ```bash
 pip install codey-review
 ```
 
-Or with [uv](https://docs.astral.sh/uv/):
+Or with uv:
 
 ```bash
 uv tool install codey-review
 ```
 
-> **Note:** The PyPI package name is `codey-review`, but the CLI command and Python import are both `codey`.
+The package on [PyPI](https://pypi.org/project/codey-review/) is named `codey-review`. The CLI command and Python import are both `codey`.
 
-## Quickstart
+## Quick start
 
 ```bash
-codey set       # pick a provider, enter your API key, choose models
-codey review   # review the latest commit (HEAD~1..HEAD)
+codey set       # configure provider, API key, and models
+codey review    # review the latest commit (HEAD~1..HEAD)
+codey review <commit>   # review a specific commit
 ```
 
-## How it works
+## Commands
 
+| Command | Purpose |
+|---------|---------|
+| `codey set` | Configure provider, API key, and models interactively |
+| `codey unset [PROVIDER]` | Remove a provider's credentials and configuration |
+| `codey model` | View or switch the active model |
+| `codey config` | Show configuration or toggle commit summary append |
+| `codey graph` | Inspect the indexed symbol, call, and import graph |
+| `codey review [COMMIT]` | Review a commit, latest by default |
+
+`codey review` options: `--no-progress`, `--force-index`, `--run-tests` (requires confirmation), `--json` (machine readable output for CI).
+
+## Providers
+
+| Provider | API key | Models |
+|----------|---------|--------|
+| OpenAI | required | gpt-4.1, gpt-4.1-mini, gpt-4o, o3-mini |
+| Anthropic | required | Claude Sonnet, Haiku, Opus |
+| DeepSeek | required | deepseek-chat, deepseek-reasoner |
+| Google | required | Gemini 2.5 Pro, Gemini 2.0 Flash |
+| Custom (OpenAI compatible) | required | any endpoint via `base_url` |
+| Local | none | Ollama, LM Studio, llama.cpp, vLLM via `/v1` |
+
+`codey set` and `codey model` fetch the live model list from each provider's API and fall back to the bundled list when the provider is unreachable.
+
+## Features
+
+### Security analysis
+
+- Deterministic hardcoded secret detector with prefix rules and Shannon entropy filtering. Scans the raw diff, never an LLM summary.
+- Optional bandit (Python), semgrep (multi-language), and gitleaks (secrets, scoped to the commit).
+- LLM confidentiality judgement for issues with no regex anchor: PII, internal endpoints, weak crypto, command injection, leaking logs.
+
+### Code quality
+
+- Benchmarks the diff against conventions found in the indexed codebase: naming, typing, docstrings, error handling, structure.
+- Verbatim evidence enforcement. Findings without a real code snippet are discarded.
+
+### Testing
+
+- Detects the test framework automatically: pytest, npm, go, cargo, rake.
+- Opt in execution via `--run-tests` with an explicit confirmation. Repo code is never run implicitly.
+
+### Indexing and caching
+
+- tree-sitter parsing cached in SQLite at `~/.cache/codey/codey.db`, keyed by git hash. Only changed files are re-parsed.
+- jedi based call graph with reverse dependency lookup that surfaces affected but unmodified files to the review.
+
+### Review pipeline
+
+- AST aware diff chunking at function and class granularity.
+- Context window budgeting with a cheap summarizer for large diffs. Pruned ranges are reported, never silently dropped.
+- LangGraph DAG fans out to the security, code quality, and test agents in parallel.
+
+### Output
+
+- Rich terminal report with a severity colored findings table and per agent overview.
+- `--json` for CI gates and machine readable consumption.
+- Optional append of the summary to the reviewed commit message, HEAD only.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    CLI["codey review"] --> CFG["Load config and LLMs"]
+    CFG --> GIT["git diff and changed files"]
+    GIT --> WT{"Non-HEAD commit?"}
+    WT -->|yes| WORKTREE["Materialize worktree"]
+    WT -->|no| SCAN["Working tree"]
+    WORKTREE --> SCAN
+
+    SCAN --> IDX["Index agent<br/>tree-sitter symbols and jedi call graph<br/>SQLite cache"]
+    IDX --> CHUNK["Chunk diffs by symbol"]
+    CHUNK --> SUM["Summarize large diffs<br/>cheap model"]
+    SUM --> BUDGET["Prune to context budget"]
+    BUDGET --> DEPS["Reverse dependency lookup"]
+
+    DEPS --> DAG
+    subgraph DAG["LangGraph DAG"]
+        I["index"] --> S["security"]
+        I --> Q["code quality"]
+        I --> T["test"]
+        S --> C["codey orchestrator"]
+        Q --> C
+        T --> C
+    end
+
+    C --> OUT["ReviewSummary<br/>severity and recommendation"]
+    OUT --> RICH["Rich terminal report"]
+    OUT --> JSON["--json output"]
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     Codey Review Pipeline                │
-│                                                          │
-│  git diff ──► AST chunker ──► diff chunks (per-symbol)   │
-│                  │                                       │
-│     reverse-dep lookup ──► dependent file sources         │
-│                  │                                       │
-│         ┌────────▼─────────┐                             │
-│         │    LangGraph DAG │                             │
-│         │  ┌─────────────┐ │                             │
-│         │  │ IndexAgent  │─┼──► architecture summary     │
-│         │  └──────┬──────┘ │                             │
-│         │         │        │  (parallel fan-out)         │
-│         │  ┌──────▼──────┐ │                             │
-│         │  │SecurityAgnt │ │ ─► detector+bandit+semgrep  │
-│         │  │CodeQualitAgt│ │ ─► convention benchmarks    │
-│         │  │ TestAgent   │ │ ─► pytest/npm/go/cargo      │
-│         │  └──────┬──────┘ │                             │
-│         │         │        │                             │
-│         │  ┌──────▼──────┐  │                             │
-│         │  │ CodeyAgent  │─┼──► final ReviewSummary      │
-│         │  └─────────────┘  │  (markdown + recommendation)│
-│         └──────────────────┘                              │
-│                  │                                       │
-│          rich render / --json                             │
-└──────────────────────────────────────────────────────────┘
-```
 
-### Agents
-
-| Agent | Role | LLM | Tools | Skips |
-|-------|------|-----|-------|-------|
-| **index** | Repo indexer + architecture summary | ✓ | tree-sitter, jedi | — |
-| **security** | Vulnerability & secret detection | ✓ | secret detector, bandit, semgrep, gitleaks | css, md, images, fonts, lock files |
-| **code_quality** | Convention & pattern benchmarks | ✓ | — | when no diff provided |
-| **test** | Test suite identification & execution (opt-in `--run-tests`) | ✓ | pytest, npm, go, cargo, rake | disabled by default; when no framework detectable |
-| **codey** | Executive synthesis + verdict | ✓ | — | — |
-
-### Structured findings
-
-Every agent emits a pydantic `AgentReport` containing `Finding` objects with `severity`, `category`, `title`, `file_path`, `line_start`, `evidence`, `recommendation`, and `confidence` (0-1). The orchestrator aggregates these into a `ReviewSummary` with an overall severity and a recommendation of `approve`, `request_changes`, or `block`.
-
-### Cache
-
-The AST/symbol cache lives at `~/.cache/codey/codey.db` (sqlite, WAL mode), keyed by absolute repo path. On each review:
-
-1. Compute current HEAD hash
-2. If already indexed → no-op (cache hit)
-3. Otherwise reuse file entries from the last indexed hash whose content hash hasn't changed; re-parse only changed files
-4. Fresh symbols + call edges + import edges stored for the new hash
+The index agent builds the symbol table and architecture summary first. Security, code quality, and test agents then run in parallel. The codey orchestrator synthesizes their reports into a final verdict. A deterministic recommendation is computed first, and the LLM can only make it stricter, never more optimistic.
 
 ## Development
 
@@ -126,16 +133,9 @@ The AST/symbol cache lives at `~/.cache/codey/codey.db` (sqlite, WAL mode), keye
 git clone https://github.com/arihant/codey
 cd codey
 uv sync
-uv run pytest tests/ -v
+uv run pytest tests/
 uv run ruff check codey/
 ```
-
-## Package
-
-- **PyPI:** https://pypi.org/project/codey-review/
-- **Install:** `pip install codey-review`
-- **Python import:** `import codey`
-- **CLI command:** `codey --help`
 
 ## License
 
