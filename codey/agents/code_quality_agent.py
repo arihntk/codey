@@ -10,6 +10,7 @@ from codey.agents.schemas import (
     FindingCategory,
     Severity,
     parse_llm_findings,
+    severity_weight,
 )
 from codey.agents.schemas import (
     llm_output_is_parseable as _llm_output_is_parseable,
@@ -91,12 +92,15 @@ def run_code_quality_agent(ctx: ReviewContext, db=None, llm: object | None = Non
     attach_evidence(findings, ctx)
     findings = [f for f in findings if f.evidence.strip()]
 
+    notable = [f for f in findings if f.severity != Severity.INFO]
+    notable.sort(key=lambda f: (-severity_weight(f.severity), f.file_path or "", f.line_start or 0))
     finding_details = "; ".join(
         f"{f.title} [{f.severity.value}]"
         + (f" at {f.file_path}:{f.line_start}" if f.file_path else "")
-        for f in findings
-        if f.severity != Severity.INFO
+        for f in notable[:8]
     )
+    if len(notable) > 8:
+        finding_details += f"; +{len(notable) - 8} more finding(s)"
     summary = (
         f"Quality analysis of {len(ctx.changed_files)} file(s) "
         f"({len(ctx.diff_chunks)} diff chunks, {len(ctx.dependent_files)} dependent files). "

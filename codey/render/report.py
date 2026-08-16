@@ -27,6 +27,10 @@ _REC_STYLE: dict[str, str] = {
     "approve": "bold green", "request_changes": "bold yellow", "block": "bold red",
 }
 
+_MAX_TABLE_ROWS = 100
+
+_MAX_AGENT_SUMMARY = 400
+
 
 def severity_style(s: Severity) -> str:
     return _SEVERITY_STYLE.get(s, "white")
@@ -85,12 +89,15 @@ def render_review(review: ReviewSummary, console: Console | None = None) -> None
         if not report:
             continue
         status_style = "bold red" if report.status == "error" else ("yellow" if report.status == "skipped" else "green")
+        summary_text = report.summary
+        if len(summary_text) > _MAX_AGENT_SUMMARY:
+            summary_text = summary_text[:_MAX_AGENT_SUMMARY].rstrip() + "…"
         agent_table.add_row(
             report.agent,
             Text(report.status, style=status_style),
             str(report.finding_count()),
             str(report.token_usage),
-            Markdown(report.summary) if report.summary else Text("(no summary)", style="dim"),
+            Markdown(summary_text) if summary_text else Text("(no summary)", style="dim"),
         )
     console.print(agent_table)
 
@@ -102,13 +109,18 @@ def print_finding_table(findings: list[Finding], *, console: Console | None = No
         return
 
     sorted_findings = sorted(findings, key=lambda f: -severity_weight(f.severity))
+    shown = [f for f in sorted_findings if f.severity != Severity.INFO]
+    info_count = len(sorted_findings) - len(shown)
+    overflow = max(0, len(shown) - _MAX_TABLE_ROWS)
+    shown = shown[:_MAX_TABLE_ROWS]
+
     table = Table(title="Findings", show_lines=True)
     table.add_column("Sev", style="bold", width=4)
     table.add_column("Category", style="cyan")
     table.add_column("Finding", style="white", overflow="fold")
     table.add_column("Location", style="dim")
 
-    for f in sorted_findings:
+    for f in shown:
         loc = f"{f.file_path}:{f.line_start}" if f.file_path and f.line_start else (f.file_path or "")
         table.add_row(
             Text(f"[{_SEVERITY_ICON[f.severity]}]", style=severity_style(f.severity)),
@@ -117,3 +129,11 @@ def print_finding_table(findings: list[Finding], *, console: Console | None = No
             loc,
         )
     console.print(table)
+
+    notes = []
+    if overflow:
+        notes.append(f"{overflow} more finding(s) omitted from table")
+    if info_count:
+        notes.append(f"{info_count} informational finding(s) omitted")
+    if notes:
+        console.print(f"[dim]{' — '.join(notes)}[/]")

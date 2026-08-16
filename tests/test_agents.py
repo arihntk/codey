@@ -6,9 +6,11 @@ import json
 
 from codey.agents.code_quality_agent import run_code_quality_agent
 from codey.agents.codey_agent import (
+    _dedupe_across_reports,
     _default_recommendation,
     _degrade_recommendation,
     _rec_rank,
+    _throttle_findings,
     run_codey_agent,
 )
 from codey.agents.context import DiffChunk, ReviewContext
@@ -21,8 +23,11 @@ from codey.agents.schemas import (
     Severity,
 )
 from codey.agents.security_agent import (
+    _dedupe_findings,
     _diff_truncated_note,
+    _filter_bandit_raw,
     _hardcoded_summary,
+    _is_test_path,
     _llm_output_is_parseable,
     _parse_bandit_json,
     _parse_gitleaks_json,
@@ -80,6 +85,78 @@ def test_default_recommendation_levels():
 def test_default_recommendation_errors_degrade():
     assert _default_recommendation([], errors=["boom"]) == "request_changes"
     assert _default_recommendation([_finding(Severity.CRITICAL)], errors=["boom"]) == "block"
+
+
+def test_throttle_findings_noop_within_cap():
+    report = AgentReport(agent="security", findings=[_finding(Severity.CRITICAL)], summary="s")
+    assert _throttle_findings(report) is report
+
+
+def test_throttle_findings_caps_and_keeps_worst():
+    findings = [_finding(Severity.LOW, title=f"noise {i}", confidence=0.5) for i in range(150)]
+    findings.insert(0, _finding(Severity.CRITICAL, title="real issue", confidence=0.9))
+    report = AgentReport(agent="security", findings=findings, summary="base")
+    out = _throttle_findings(report)
+    assert len(out.findings) == 100
+    assert out.findings[0].title == "real issue"
+    assert "suppressed" in out.summary
+    assert out.findings[0].severity == Severity.CRITICAL
+
+
+def test_dedupe_across_reports_collapses_duplicates():
+    keep = Finding(
+        category=FindingCategory.SECURITY, severity=Severity.HIGH,
+        title="dup", file_path="a.py", line_start=5,
+    )
+    reports = {
+        "security": AgentReport(agent="security", findings=[keep]),
+        "code_quality": AgentReport(agent="code_quality", findings=[
+            Finding(
+                category=FindingCategory.SECURITY, severity=Severity.HIGH,
+                title="dup2", file_path="a.py", line_start=5,
+            ),
+        ]),
+    }
+    out = _dedupe_across_reports(reports)
+    assert sum(len(r.findings) for r in out.values()) == 1
+    assert out["code_quality"].findings == []
+
+
+def test_security_dedupe_findings_keeps_highest_confidence():
+    f_detector = Finding(
+        category=FindingCategory.SECURITY, severity=Severity.CRITICAL,
+        title="[hardcoded] OpenAI API key detected",
+        file_path="a.py", line_start=5, confidence=0.95,
+    )
+    f_llm = Finding(
+        category=FindingCategory.SECURITY, severity=Severity.CRITICAL,
+        title="OpenAI API key detected", file_path="a.py", line_start=5, confidence=0.7,
+    )
+    out = _dedupe_findings([f_llm, f_detector])
+    assert len(out) == 1
+    assert out[0] is f_detector
+
+
+def test_is_test_path():
+    assert _is_test_path("tests/test_x.py") is True
+    assert _is_test_path("./tests/conftest.py") is True
+    assert _is_test_path("src/foo_test.py") is True
+    assert _is_test_path("src/foo.py") is False
+    assert _is_test_path(None) is False
+
+
+def test_filter_bandit_raw_drops_noise_in_tests_only():
+    raw = json.dumps({"results": [
+        {"test_id": "B101", "filename": "tests/test_a.py"},
+        {"test_id": "B101", "filename": "src/a.py"},
+        {"test_id": "B404", "filename": "./tests/conftest.py"},
+        {"test_id": "B301", "filename": "tests/test_a.py"},
+    ]})
+    out = json.loads(_filter_bandit_raw(raw))
+    assert out["results"] == [
+        {"test_id": "B101", "filename": "src/a.py"},
+        {"test_id": "B301", "filename": "tests/test_a.py"},
+    ]
 
 
 def test_run_codey_agent_no_llm_deterministic():

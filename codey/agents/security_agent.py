@@ -16,6 +16,7 @@ from codey.agents.schemas import (
     Severity,
     llm_output_is_parseable,
     parse_llm_findings,
+    severity_weight,
     strip_code_fences,
 )
 from codey.agents.secrets import detect_hardcoded_secrets
@@ -37,6 +38,26 @@ _SKIP_SUFFIXES = {
     ".pdf", ".zip", ".tar", ".gz", ".bz2", ".lock",
 }
 _BANDIT_LANG = ".py"
+
+# Low-signal bandit rules that fire on idiomatic test code (asserts, subprocess
+# fixtures, fake credentials). They flood reviews with per-line noise when a test
+# suite is committed, so they are dropped for test files only.
+_BANDIT_TEST_NOISE = {"B101", "B105", "B404", "B603", "B607"}
+_BANDIT_ID_PREFIX = "[bandit] "
+
+
+def _is_test_path(path: str | None) -> bool:
+    if not path:
+        return False
+    norm = path.lstrip("./")
+    name = norm.rsplit("/", 1)[-1]
+    return (
+        norm.startswith("tests/")
+        or norm.startswith("test/")
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+    )
 
 
 def _should_skip(path: str) -> bool:
@@ -88,7 +109,7 @@ def run_security_agent(ctx: ReviewContext, db=None, llm: object | None = None) -
     tool_errors: list[str] = []
     bandit_out, bandit_err = _run_bandit(repo, py_files)
     if bandit_out:
-        raw_results["bandit"] = bandit_out
+        raw_results["bandit"] = _filter_bandit_raw(bandit_out)
     if bandit_err:
         tool_errors.append(f"bandit: {bandit_err}")
     semgrep_out, semgrep_err = _run_semgrep(repo, all_relevant)
@@ -130,6 +151,7 @@ def run_security_agent(ctx: ReviewContext, db=None, llm: object | None = None) -
     findings: list[Finding] = list(llm_kept)
     findings.extend(f for f in tool_findings if f.title not in hardcoded_titles)
     findings.extend(hardcoded)
+    findings = _dedupe_findings(findings)
 
     if not findings and report_error is None:
         tool_evidence = "; ".join(f"{k}: 0 issues" for k in raw_results) or "no external tools ran"
@@ -154,12 +176,15 @@ def run_security_agent(ctx: ReviewContext, db=None, llm: object | None = None) -
         findings = [f for f in findings if id(f) not in {id(x) for x in llm_kept} or id(f) in kept_ids]
 
     tools_used = list(raw_results) or ["no external security tools"]
+    notable = [f for f in findings if f.severity != Severity.INFO]
+    notable.sort(key=lambda f: (-severity_weight(f.severity), f.file_path or "", f.line_start or 0))
     finding_details = "; ".join(
         f"{f.title} [{f.severity.value}]"
         + (f" at {f.file_path}:{f.line_start}" if f.file_path else "")
-        for f in findings
-        if f.severity != Severity.INFO
+        for f in notable[:8]
     )
+    if len(notable) > 8:
+        finding_details += f"; +{len(notable) - 8} more finding(s)"
     summary = (
         f"Security scan using {', '.join(tools_used)} + hardcoded-secret detector"
         + (", LLM confidentiality review" if llm is not None else "")
@@ -329,6 +354,41 @@ def _parse_gitleaks_json(raw: str) -> list[Finding]:
 def _parse_tool_results(source: str, raw: str) -> list[Finding]:
     parsers = {"bandit": _parse_bandit_json, "semgrep": _parse_semgrep_json, "gitleaks": _parse_gitleaks_json}
     return parsers[source](raw) if source in parsers else []
+
+
+def _filter_bandit_raw(raw: str) -> str:
+    """Drop low-signal bandit findings (asserts/subprocess/fake creds) in test files."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    results = data.get("results", [])
+    data["results"] = [
+        r for r in results
+        if not (r.get("test_id") in _BANDIT_TEST_NOISE and _is_test_path(r.get("filename", "")))
+    ]
+    return json.dumps(data)
+
+
+def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
+    """Collapse findings that target the same (category, file, line).
+
+    Keeps the highest-severity (then highest-confidence) representative, so a
+    secret reported by the detector, an external tool and the LLM surfaces once.
+    """
+    best: dict[tuple[str, str, int], Finding] = {}
+    unlocated: list[Finding] = []
+    for f in findings:
+        if not f.file_path or f.line_start is None:
+            unlocated.append(f)
+            continue
+        key = (f.category.value, f.file_path, f.line_start)
+        prev = best.get(key)
+        if prev is None or (severity_weight(f.severity), f.confidence) >= (
+            severity_weight(prev.severity), prev.confidence
+        ):
+            best[key] = f
+    return unlocated + list(best.values())
 
 
 # --- LLM synthesis ----

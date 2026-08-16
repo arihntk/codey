@@ -37,6 +37,12 @@ _SYNTHESIS_SYSTEM = (
 
 _REC_RANK = {"approve": 0, "request_changes": 1, "block": 2}
 
+# Hard ceiling on findings kept from any single agent report. Whatever floods
+# (a per-line lint rule, a noisy tool, a verbose LLM), the review stays focused.
+_MAX_FINDINGS_PER_AGENT = 100
+
+_AGENT_PRIORITY = {"security": 0, "code_quality": 1, "test": 2, "index": 3, "codey": 4}
+
 
 def _rec_rank(rec: str) -> int:
     return _REC_RANK.get(rec, 0)
@@ -56,6 +62,49 @@ def _default_recommendation(findings: list[Finding], *, errors: list[str] | None
     return _degrade_recommendation(base) if errors else base
 
 
+def _throttle_findings(report: AgentReport) -> AgentReport:
+    """Cap a report's findings, keeping the highest-severity ones, and note the suppression."""
+    if len(report.findings) <= _MAX_FINDINGS_PER_AGENT:
+        return report
+    ranked = sorted(report.findings, key=lambda f: (-severity_weight(f.severity), -f.confidence))
+    kept = ranked[:_MAX_FINDINGS_PER_AGENT]
+    suppressed = len(report.findings) - len(kept)
+    note = f"{suppressed} low-priority finding(s) suppressed (cap {_MAX_FINDINGS_PER_AGENT})."
+    summary = f"{report.summary} {note}" if report.summary else note
+    return AgentReport(
+        agent=report.agent, status=report.status, summary=summary,
+        findings=kept, metadata=report.metadata, token_usage=report.token_usage,
+        error=report.error,
+    )
+
+
+def _dedupe_across_reports(reports: dict[str, AgentReport]) -> dict[str, AgentReport]:
+    """Collapse duplicate findings across agents by (category, file, line)."""
+    seen: set[tuple[str, str, int]] = set()
+    deduped: dict[str, AgentReport] = {}
+    for name in sorted(reports, key=lambda n: _AGENT_PRIORITY.get(n, 99)):
+        report = reports[name]
+        kept = []
+        for f in report.findings:
+            if not f.file_path or f.line_start is None:
+                kept.append(f)
+                continue
+            key = (f.category.value, f.file_path, f.line_start)
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(f)
+        if len(kept) == len(report.findings):
+            deduped[name] = report
+            continue
+        deduped[name] = AgentReport(
+            agent=report.agent, status=report.status, summary=report.summary,
+            findings=kept, metadata=report.metadata, token_usage=report.token_usage,
+            error=report.error,
+        )
+    return deduped
+
+
 def run_codey_agent(
     ctx: ReviewContext,
     agent_reports: dict[str, AgentReport],
@@ -63,6 +112,8 @@ def run_codey_agent(
     *,
     prior_errors: list[str] | None = None,
 ) -> ReviewSummary:
+    agent_reports = _dedupe_across_reports(agent_reports)
+    agent_reports = {name: _throttle_findings(r) for name, r in agent_reports.items()}
     all_findings: list[Finding] = [f for r in agent_reports.values() for f in r.findings]
     overall = aggregate_severity(all_findings)
 
@@ -131,13 +182,14 @@ def _build_text_summary(ctx: ReviewContext, reports: dict[str, AgentReport], ove
             continue
         lines.append(f"### {report.agent.title()} Agent ({report.status})")
         lines.append(f"> {report.summary}")
-        for f in report.findings:
-            if f.severity == Severity.INFO:
-                continue
+        notable = [f for f in report.findings if f.severity != Severity.INFO]
+        for f in notable[:50]:
             loc = f"{f.file_path}:{f.line_start}" if f.file_path else ""
             lines.append(f"- **[{f.severity.value.upper()}]** {f.title}" + (f" `{loc}`" if loc else ""))
             if f.recommendation:
                 lines.append(f"  - {f.recommendation}")
+        if len(notable) > 50:
+            lines.append(f"  - … {len(notable) - 50} more finding(s)")
         lines.append("")
     lines.append("---")
     return "\n".join(lines)
