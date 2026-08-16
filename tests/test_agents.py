@@ -23,6 +23,7 @@ from codey.agents.schemas import (
     Severity,
 )
 from codey.agents.security_agent import (
+    _bandit_literal_at_line,
     _dedupe_findings,
     _diff_truncated_note,
     _filter_bandit_raw,
@@ -157,6 +158,51 @@ def test_filter_bandit_raw_drops_noise_in_tests_only():
         {"test_id": "B101", "filename": "src/a.py"},
         {"test_id": "B301", "filename": "tests/test_a.py"},
     ]
+
+
+def test_filter_bandit_raw_drops_b105_placeholders_anywhere():
+    """B105 hardcoded-password findings on placeholder/low-entropy values are
+    dropped everywhere — same precision gate as the deterministic detector."""
+    raw = json.dumps({"results": [
+        {"test_id": "B105", "filename": "creds.py", "line_number": 1,
+         "code": '1 PASSWORD = "changeme"\n'},
+        {"test_id": "B105", "filename": "creds.py", "line_number": 2,
+         "code": '2 TOKEN = "aaaaaaaaaaaaaaaa"\n'},
+        {"test_id": "B105", "filename": "creds.py", "line_number": 3,
+         "code": '3 pwd = ""\n'},
+        {"test_id": "B105", "filename": "creds.py", "line_number": 4,
+         "code": '4 KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'},
+        {"test_id": "B301", "filename": "src/a.py", "line_number": 1,
+         "code": '1 x = pickle.loads(data)\n'},
+    ]})
+    out = json.loads(_filter_bandit_raw(raw))
+    assert [r["line_number"] for r in out["results"]] == [4, 1]
+
+
+def test_bandit_literal_at_line():
+    code = '1 PASSWORD = "changeme"\n2 TOKEN = "real-secret-value"\n'
+    assert _bandit_literal_at_line(1, code) == "changeme"
+    assert _bandit_literal_at_line(2, code) == "real-secret-value"
+    assert _bandit_literal_at_line(9, code) is None
+    assert _bandit_literal_at_line(None, code) is None
+
+
+def test_dedupe_findings_normalises_path_prefix():
+    """Tool findings use ``./file.py`` while diff findings use ``file.py`` — the
+    two must collapse when they target the same line."""
+    f_tool = Finding(
+        category=FindingCategory.SECURITY, severity=Severity.LOW,
+        title="[bandit] B105: hardcoded password", file_path="./a.py",
+        line_start=5, confidence=0.6,
+    )
+    f_detector = Finding(
+        category=FindingCategory.SECURITY, severity=Severity.CRITICAL,
+        title="[hardcoded] OpenAI API key detected", file_path="a.py",
+        line_start=5, confidence=0.95,
+    )
+    out = _dedupe_findings([f_tool, f_detector])
+    assert len(out) == 1
+    assert out[0] is f_detector
 
 
 def test_run_codey_agent_no_llm_deterministic():

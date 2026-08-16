@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,7 +20,12 @@ from codey.agents.schemas import (
     severity_weight,
     strip_code_fences,
 )
-from codey.agents.secrets import detect_hardcoded_secrets
+from codey.agents.secrets import (
+    _MIN_SECRET_ENTROPY,
+    _is_placeholder,
+    detect_hardcoded_secrets,
+    shannon_entropy,
+)
 from codey.llm.response import extract_text, response_tokens
 from codey.llm.retry import invoke_with_retry
 from codey.process import allowlist_env, scrubbed_env
@@ -357,17 +363,52 @@ def _parse_tool_results(source: str, raw: str) -> list[Finding]:
 
 
 def _filter_bandit_raw(raw: str) -> str:
-    """Drop low-signal bandit findings (asserts/subprocess/fake creds) in test files."""
+    """Drop low-signal bandit findings.
+
+    Low-signal rules (asserts/subprocess/fake credentials) are dropped in test
+    files, and B105 hardcoded-password findings whose value is a placeholder or
+    degenerate (low entropy) are dropped everywhere — the same precision gate
+    the deterministic hardcoded-secret detector applies.
+    """
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return raw
     results = data.get("results", [])
-    data["results"] = [
-        r for r in results
-        if not (r.get("test_id") in _BANDIT_TEST_NOISE and _is_test_path(r.get("filename", "")))
-    ]
+    data["results"] = [r for r in results if not _low_signal_bandit(r)]
     return json.dumps(data)
+
+
+def _low_signal_bandit(result: dict) -> bool:
+    if result.get("test_id") in _BANDIT_TEST_NOISE and _is_test_path(result.get("filename", "")):
+        return True
+    if result.get("test_id") == "B105":
+        value = _bandit_literal_at_line(result.get("line_number"), result.get("code", ""))
+        if value is not None and (_is_placeholder(value) or shannon_entropy(value) < _MIN_SECRET_ENTROPY):
+            return True
+    return False
+
+
+def _bandit_literal_at_line(line_no: int | None, code: str) -> str | None:
+    """Extract the first quoted literal on the code line matching *line_no*.
+
+    Bandit's ``code`` field is a numbered snippet of surrounding source, so the
+    literal is taken from the specific line the finding points at.
+    """
+    if line_no is None:
+        return None
+    for raw in code.splitlines():
+        m = re.match(r"^\s*(\d+)\s+(.*)$", raw)
+        if not m or int(m.group(1)) != line_no:
+            continue
+        val = re.search(r"([\"'`])(?P<val>[^\"'`]*)\1", m.group(2))
+        return val.group("val") if val else None
+    return None
+
+
+def _normalise_path(path: str) -> str:
+    """Collapse a leading ``./`` so tool paths and diff paths dedup."""
+    return path.lstrip("./")
 
 
 def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
@@ -382,7 +423,7 @@ def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
         if not f.file_path or f.line_start is None:
             unlocated.append(f)
             continue
-        key = (f.category.value, f.file_path, f.line_start)
+        key = (f.category.value, _normalise_path(f.file_path), f.line_start)
         prev = best.get(key)
         if prev is None or (severity_weight(f.severity), f.confidence) >= (
             severity_weight(prev.severity), prev.confidence

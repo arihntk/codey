@@ -89,7 +89,7 @@ def _dedupe_across_reports(reports: dict[str, AgentReport]) -> dict[str, AgentRe
             if not f.file_path or f.line_start is None:
                 kept.append(f)
                 continue
-            key = (f.category.value, f.file_path, f.line_start)
+            key = (f.category.value, f.file_path.lstrip("./"), f.line_start)
             if key in seen:
                 continue
             seen.add(key)
