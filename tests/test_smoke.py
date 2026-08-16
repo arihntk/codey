@@ -8,48 +8,6 @@ from __future__ import annotations
 import pytest
 
 
-# Use a temp cache dir so tests don't pollute the real cache.
-@pytest.fixture(autouse=True)
-def _temp_cache(monkeypatch, tmp_path_factory):
-    cache_dir = tmp_path_factory.mktemp("codey-cache")
-    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_dir))
-    config_dir = tmp_path_factory.mktemp("codey-config")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_dir))
-
-@pytest.fixture
-def repo(tmp_path):
-    """Create a tiny git repo with one Python file."""
-    import subprocess
-
-    repo = tmp_path / "test-repo"
-    repo.mkdir()
-    (repo / "main.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n\n"
-        "def sub(a, b):\n"
-        "    return add(a, -b)\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=str(repo), check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True)
-    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=str(repo), check=True)
-    # Add a second commit to get a diff.
-    (repo / "main.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n\n"
-        "def sub(a, b):\n"
-        "    return add(a, -b)\n\n"
-        "def mul(a, b):\n"
-        "    return a * b\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "add mul function"], cwd=str(repo), check=True)
-    return repo
-
-
 class TestConfigProviders:
     def test_presets_exist(self):
         from codey.config.providers import PRESETS, get_preset
