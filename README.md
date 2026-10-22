@@ -8,6 +8,60 @@ Production grade multi-agent AI code review system. Codey orchestrates four spec
 
 Built on LangGraph with tree-sitter AST caching and jedi based reverse dependency lookup.
 
+## Architecture
+
+```mermaid
+---
+config:
+  theme: base
+  layout: dagre
+  look: classic
+---
+flowchart TB
+    CLI["codey"]
+
+    subgraph SETUP["Setup"]
+        CFG["Config"]
+        LLM["LLM factory"]
+    end
+
+    subgraph REVIEW["Review"]
+        GIT["Git diff<br/> and worktree"]
+        IDX[("Index + SQLite cache")]
+        CTX["Context builder<br/>chunk · summarize<br/>deps · budget"]
+    end
+
+    subgraph DAG["Agent Graph"]
+        IA["Index Agent"]
+        AG["Security Agent <br/> Quality Agent <br/>Test Agent"]
+        ORCH["Orchestrator"]
+        IA --> AG --> ORCH
+    end
+
+    OUT["ReviewSummary"]
+    EVAL["Eval harness<br/>(scenarios · metrics · judge)"]
+
+    CLI -->|"set / model / config"| CFG
+    CFG --> LLM
+    CLI -->|"review"| GIT
+    CLI -->|"graph"| IDX
+    CLI -->|"eval"| EVAL
+
+    GIT --> IDX
+    IDX --> CTX
+    CTX --> IA
+    IA & AG & ORCH -.->|"LLM calls"| LLM
+
+    ORCH --> OUT
+    EVAL -->|"runs pipeline"| GIT
+    EVAL -.->|"judge"| LLM
+
+    classDef store fill:#F0DEFD,stroke:#D8C77A,color:#1F2430
+    class CFG,IDX store
+```
+
+The index agent builds the symbol table and architecture summary first. Security, code quality, and test agents then run in parallel. The codey orchestrator synthesizes their reports into a final verdict. A deterministic recommendation is computed first, and the LLM can only make it stricter, never more optimistic.
+
 ## Install
 
 Codey requires Python 3.13+.
@@ -95,40 +149,6 @@ codey review <commit>   # review a specific commit
 - Rich terminal report with a severity colored findings table and per agent overview.
 - `--json` for CI gates and machine readable consumption.
 - Optional append of the summary to the reviewed commit message, HEAD only.
-
-## Architecture
-
-```mermaid
-flowchart TD
-    CLI["codey review"] --> CFG["Load config and LLMs"]
-    CFG --> GIT["git diff and changed files"]
-    GIT --> WT{"Non-HEAD commit?"}
-    WT -->|yes| WORKTREE["Materialize worktree"]
-    WT -->|no| SCAN["Working tree"]
-    WORKTREE --> SCAN
-
-    SCAN --> IDX["Index agent<br/>tree-sitter symbols and jedi call graph<br/>SQLite cache"]
-    IDX --> CHUNK["Chunk diffs by symbol"]
-    CHUNK --> SUM["Summarize large diffs<br/>cheap model"]
-    SUM --> BUDGET["Prune to context budget"]
-    BUDGET --> DEPS["Reverse dependency lookup"]
-
-    DEPS --> DAG
-    subgraph DAG["LangGraph DAG"]
-        I["index"] --> S["security"]
-        I --> Q["code quality"]
-        I --> T["test"]
-        S --> C["codey orchestrator"]
-        Q --> C
-        T --> C
-    end
-
-    C --> OUT["ReviewSummary<br/>severity and recommendation"]
-    OUT --> RICH["Rich terminal report"]
-    OUT --> JSON["--json output"]
-```
-
-The index agent builds the symbol table and architecture summary first. Security, code quality, and test agents then run in parallel. The codey orchestrator synthesizes their reports into a final verdict. A deterministic recommendation is computed first, and the LLM can only make it stricter, never more optimistic.
 
 ## Evaluation
 
